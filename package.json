@@ -1,0 +1,47 @@
+{
+  "name": "pi-prune-chunks",
+  "version": "0.1.0",
+  "description": "Context management companion for pi — tracks tool-result chunks and lets the agent prune/restore them to manage context window",
+  "main": "index.ts",
+  "files": [
+    "index.ts",
+    "src/**/*.ts",
+    "README.md",
+    "LICENSE",
+    "pi.d.ts"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build:test": "rm -rf .tmp-test && tsc -p tsconfig.test.json",
+    "test": "npm run build:test && node --test .tmp-test/test/*.test.js",
+    "test:coverage": "npm run build:test && NODE_V8_COVERAGE=coverage node --test --experimental-test-coverage .tmp-test/test/*.test.js",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "check": "biome check . && npm run typecheck && npm run test:coverage",
+    "pack:dry": "npm pack --dry-run"
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "pi-extension",
+    "context-management",
+    "pruning",
+    "reamer"
+  ],
+  "author": "cawalch",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.14",
+    "@types/node": "^24.10.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": "22.x || 24.x"
+  },
+  "packageManager": "npm@11.6.2"
+}
