@@ -8,11 +8,14 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import {
   ChunkTracker,
+  checkPruneStreak,
   contentText,
   contextFooter,
   estimateTokens,
+  hardThresholdCheck,
   makeLabel,
   PRUNEABLE_TOOLS,
+  softThresholdCheck,
   tombstoneFor,
 } from "../src/tracker";
 
@@ -438,5 +441,119 @@ describe("contextFooter", () => {
       prunedTokens: 2000,
     });
     assert.ok(footer.length < 150, `Footer too long: ${footer.length} chars`);
+  });
+});
+
+describe("softThresholdCheck", () => {
+  test("no warning below threshold", () => {
+    const result = softThresholdCheck(14000, 32768, 0.5, false);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, false);
+    assert.equal(result.message, null);
+  });
+
+  test("warning fires when crossing threshold", () => {
+    const result = softThresholdCheck(17000, 32768, 0.5, false);
+    assert.equal(result.shouldWarn, true);
+    assert.equal(result.isActive, true);
+    assert.ok(result.message!.includes("52%"));
+    assert.ok(result.message!.includes("prune_chunks"));
+  });
+
+  test("no repeat warning while already active (hysteresis)", () => {
+    const result = softThresholdCheck(18000, 32768, 0.5, true);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, true);
+  });
+
+  test("resets when usage drops below threshold", () => {
+    const result = softThresholdCheck(14000, 32768, 0.5, true);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, false);
+  });
+
+  test("re-warns after reset and re-crossing", () => {
+    const reset = softThresholdCheck(14000, 32768, 0.5, true);
+    assert.equal(reset.isActive, false);
+    const rewarn = softThresholdCheck(17000, 32768, 0.5, reset.isActive);
+    assert.equal(rewarn.shouldWarn, true);
+    assert.equal(rewarn.isActive, true);
+  });
+
+  test("respects custom threshold", () => {
+    const result = softThresholdCheck(14000, 32768, 0.3, false);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("43%"));
+  });
+});
+
+describe("hardThresholdCheck", () => {
+  test("does not block below threshold", () => {
+    const result = hardThresholdCheck(25000, 32768, 0.9);
+    assert.equal(result.shouldBlock, false);
+    assert.equal(result.message, null);
+  });
+
+  test("blocks at threshold", () => {
+    const result = hardThresholdCheck(30000, 32768, 0.9);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("92%"));
+    assert.ok(result.message!.includes("prune_chunks"));
+  });
+
+  test("blocks at 100%", () => {
+    const result = hardThresholdCheck(32768, 32768, 0.9);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("100%"));
+  });
+
+  test("respects custom threshold", () => {
+    const result = hardThresholdCheck(20000, 32768, 0.5);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("61%"));
+  });
+
+  test("message instructs agent to prune or conclude", () => {
+    const result = hardThresholdCheck(30000, 32768, 0.9);
+    assert.ok(result.message!.includes("end your response"));
+    assert.ok(result.message!.includes("prune_chunks"));
+    assert.ok(result.message!.includes("restore_chunks"));
+  });
+});
+
+describe("checkPruneStreak", () => {
+  test("no warning within limit", () => {
+    const result = checkPruneStreak(1, 5, 3);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.message, null);
+  });
+
+  test("no warning at exact limit", () => {
+    const result = checkPruneStreak(3, 2, 3);
+    assert.equal(result.shouldWarn, false);
+  });
+
+  test("warns when streak exceeds limit", () => {
+    const result = checkPruneStreak(4, 1, 3);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("4 times in a row"));
+    assert.ok(result.message!.includes("Batch your pruning"));
+  });
+
+  test("warns on extended streak", () => {
+    const result = checkPruneStreak(10, 1, 3);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("10 times in a row"));
+  });
+
+  test("respects custom limit", () => {
+    const result = checkPruneStreak(6, 1, 5);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("6 times in a row"));
+  });
+
+  test("no warning for batched calls even at high count", () => {
+    const result = checkPruneStreak(4, 10, 3);
+    assert.equal(result.shouldWarn, true);
   });
 });
