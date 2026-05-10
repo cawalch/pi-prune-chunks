@@ -13,6 +13,7 @@ import {
   estimateTokens,
   makeLabel,
   PRUNEABLE_TOOLS,
+  softThresholdCheck,
   tombstoneFor,
 } from "../src/tracker";
 
@@ -438,5 +439,48 @@ describe("contextFooter", () => {
       prunedTokens: 2000,
     });
     assert.ok(footer.length < 150, `Footer too long: ${footer.length} chars`);
+  });
+});
+
+describe("softThresholdCheck", () => {
+  test("no warning below threshold", () => {
+    const result = softThresholdCheck(14000, 32768, 0.5, false);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, false);
+    assert.equal(result.message, null);
+  });
+
+  test("warning fires when crossing threshold", () => {
+    const result = softThresholdCheck(17000, 32768, 0.5, false);
+    assert.equal(result.shouldWarn, true);
+    assert.equal(result.isActive, true);
+    assert.ok(result.message!.includes("52%"));
+    assert.ok(result.message!.includes("prune_chunks"));
+  });
+
+  test("no repeat warning while already active (hysteresis)", () => {
+    const result = softThresholdCheck(18000, 32768, 0.5, true);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, true);
+  });
+
+  test("resets when usage drops below threshold", () => {
+    const result = softThresholdCheck(14000, 32768, 0.5, true);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, false);
+  });
+
+  test("re-warns after reset and re-crossing", () => {
+    const reset = softThresholdCheck(14000, 32768, 0.5, true);
+    assert.equal(reset.isActive, false);
+    const rewarn = softThresholdCheck(17000, 32768, 0.5, reset.isActive);
+    assert.equal(rewarn.shouldWarn, true);
+    assert.equal(rewarn.isActive, true);
+  });
+
+  test("respects custom threshold", () => {
+    const result = softThresholdCheck(14000, 32768, 0.3, false);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("43%"));
   });
 });

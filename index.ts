@@ -11,12 +11,15 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { ChunkTracker, contextFooter, tombstoneFor } from "./src/tracker";
+import { ChunkTracker, contextFooter, softThresholdCheck, tombstoneFor } from "./src/tracker";
 
 const STATE_TYPE = "prune-chunks-state";
 
 export default function (pi: ExtensionAPI) {
   const tracker = new ChunkTracker();
+
+  // Threshold enforcement state
+  let softThresholdActive = false;
 
   // -----------------------------------------------------------------------
   // Persistence
@@ -98,6 +101,20 @@ export default function (pi: ExtensionAPI) {
         },
       ];
       modified = true;
+
+      // 3. Soft threshold warning — shift from exploration to selective retention
+      const softCheck = softThresholdCheck(usage.tokens, usage.limit, 0.5, softThresholdActive);
+      softThresholdActive = softCheck.isActive;
+      if (softCheck.shouldWarn && softCheck.message) {
+        messages = [
+          ...messages,
+          {
+            role: "toolResult" as const,
+            toolCallId: "__prune_chunks_soft_warning__",
+            content: [{ type: "text" as const, text: softCheck.message }],
+          },
+        ];
+      }
     }
 
     if (modified) {

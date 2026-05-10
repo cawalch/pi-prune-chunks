@@ -132,6 +132,30 @@ export function contextFooter(
   );
 }
 
+/** Check if usage crosses the soft threshold and generate warning if so. */
+export function softThresholdCheck(
+  usedTokens: number,
+  limitTokens: number,
+  threshold: number,
+  wasActive: boolean,
+): { shouldWarn: boolean; isActive: boolean; message: string | null } {
+  const pct = usedTokens / limitTokens;
+  const isActive = pct >= threshold;
+
+  if (isActive && !wasActive) {
+    const pctDisplay = Math.round(pct * 100);
+    return {
+      shouldWarn: true,
+      isActive: true,
+      message:
+        `\u26A0\uFE0F Context usage at ${pctDisplay}%. Consider pruning chunks with ` +
+        `list_context_chunks + prune_chunks to free space, or provide your final answer.`,
+    };
+  }
+
+  return { shouldWarn: false, isActive, message: null };
+}
+
 // ---------------------------------------------------------------------------
 // ChunkTracker
 // ---------------------------------------------------------------------------
