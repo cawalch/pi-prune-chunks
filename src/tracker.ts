@@ -132,6 +132,24 @@ export function contextFooter(
   );
 }
 
+/** Check for degenerate consecutive prune streaks. */
+export function checkPruneStreak(
+  consecutiveCount: number,
+  batchSize: number,
+  maxConsecutive: number,
+): { shouldWarn: boolean; message: string | null } {
+  if (consecutiveCount > maxConsecutive) {
+    return {
+      shouldWarn: true,
+      message:
+        `\u26A0\uFE0F You have called prune_chunks ${consecutiveCount} times in a row. ` +
+        `Batch your pruning \u2014 pass all chunk ids in a single call instead of ` +
+        `pruning one at a time.`,
+    };
+  }
+  return { shouldWarn: false, message: null };
+}
+
 /** Check if usage is above hard cutoff threshold. */
 export function hardThresholdCheck(
   usedTokens: number,

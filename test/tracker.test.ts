@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import test, { describe } from "node:test";
 import {
   ChunkTracker,
+  checkPruneStreak,
   contentText,
   contextFooter,
   estimateTokens,
@@ -517,5 +518,42 @@ describe("hardThresholdCheck", () => {
     assert.ok(result.message!.includes("end your response"));
     assert.ok(result.message!.includes("prune_chunks"));
     assert.ok(result.message!.includes("restore_chunks"));
+  });
+});
+
+describe("checkPruneStreak", () => {
+  test("no warning within limit", () => {
+    const result = checkPruneStreak(1, 5, 3);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.message, null);
+  });
+
+  test("no warning at exact limit", () => {
+    const result = checkPruneStreak(3, 2, 3);
+    assert.equal(result.shouldWarn, false);
+  });
+
+  test("warns when streak exceeds limit", () => {
+    const result = checkPruneStreak(4, 1, 3);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("4 times in a row"));
+    assert.ok(result.message!.includes("Batch your pruning"));
+  });
+
+  test("warns on extended streak", () => {
+    const result = checkPruneStreak(10, 1, 3);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("10 times in a row"));
+  });
+
+  test("respects custom limit", () => {
+    const result = checkPruneStreak(6, 1, 5);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("6 times in a row"));
+  });
+
+  test("no warning for batched calls even at high count", () => {
+    const result = checkPruneStreak(4, 10, 3);
+    assert.equal(result.shouldWarn, true);
   });
 });

@@ -13,6 +13,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
   ChunkTracker,
+  checkPruneStreak,
   contextFooter,
   hardThresholdCheck,
   softThresholdCheck,
@@ -26,6 +27,9 @@ export default function (pi: ExtensionAPI) {
 
   // Threshold enforcement state
   let softThresholdActive = false;
+
+  // Streak prevention state
+  let consecutivePruneCount = 0;
 
   // -----------------------------------------------------------------------
   // Persistence
@@ -135,6 +139,11 @@ export default function (pi: ExtensionAPI) {
   const ALWAYS_ALLOWED_TOOLS = new Set(["list_context_chunks", "prune_chunks", "restore_chunks"]);
 
   pi.on("tool_call", async (event, ctx) => {
+    // Reset prune streak counter on non-prune tool calls
+    if (event.toolName !== "prune_chunks") {
+      consecutivePruneCount = 0;
+    }
+
     if (ALWAYS_ALLOWED_TOOLS.has(event.toolName)) return;
 
     const usage = ctx.getContextUsage();
@@ -223,6 +232,10 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      // Streak detection — enforce batching
+      consecutivePruneCount++;
+      const streakResult = checkPruneStreak(consecutivePruneCount, params.ids.length, 3);
+
       const results = tracker.prune(params.ids, params.reason);
       const prunedResults = results.filter((r) => r.status === "pruned");
       const freedTokens = prunedResults.reduce((s, r) => s + r.tokens, 0);
@@ -234,6 +247,10 @@ export default function (pi: ExtensionAPI) {
         "",
         ...results.map((r) => `  ${r.id.slice(0, 36)}: ${r.status} (~${r.tokens}t)`),
       ];
+
+      if (streakResult.shouldWarn && streakResult.message) {
+        lines.push("", streakResult.message);
+      }
 
       return {
         content: [{ type: "text", text: lines.join("\n") }],
