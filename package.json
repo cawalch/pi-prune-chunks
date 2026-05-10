@@ -19,6 +19,7 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "biome check . && npm run typecheck && npm run test:coverage",
+    "bench:context-savings": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/context-savings.js",
     "pack:dry": "npm pack --dry-run"
   },
   "keywords": [

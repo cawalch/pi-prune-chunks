@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "../.tmp-bench",
+    "rootDir": "..",
+    "sourceMap": false
+  },
+  "include": ["../src/**/*.ts", "./**/*.ts", "../pi.d.ts"]
+}
