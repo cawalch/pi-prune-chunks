@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!node_modules", "!dist", "!.tmp-test", "!coverage", "!.pi"]
+    "includes": ["**", "!node_modules", "!dist", "!.tmp-test", "!.tmp-bench", "!coverage", "!.pi"]
   },
   "formatter": {
     "enabled": true,
