@@ -132,6 +132,68 @@ export function contextFooter(
   );
 }
 
+/** Check if usage crosses the soft threshold and generate warning if so. */
+export function softThresholdCheck(
+  usedTokens: number,
+  limitTokens: number,
+  threshold: number,
+  wasActive: boolean,
+): { shouldWarn: boolean; isActive: boolean; message: string | null } {
+  const pct = usedTokens / limitTokens;
+  const isActive = pct >= threshold;
+
+  if (isActive && !wasActive) {
+    const pctDisplay = Math.round(pct * 100);
+    return {
+      shouldWarn: true,
+      isActive: true,
+      message:
+        `\u26A0\uFE0F Context usage at ${pctDisplay}%. Consider pruning chunks with ` +
+        `list_context_chunks + prune_chunks to free space, or provide your final answer.`,
+    };
+  }
+
+  return { shouldWarn: false, isActive, message: null };
+}
+
+/** Check if usage is above hard cutoff threshold. */
+export function hardThresholdCheck(
+  usedTokens: number,
+  limitTokens: number,
+  threshold: number,
+): { shouldBlock: boolean; message: string | null } {
+  const pct = usedTokens / limitTokens;
+  if (pct >= threshold) {
+    const pctDisplay = Math.round(pct * 100);
+    return {
+      shouldBlock: true,
+      message:
+        `\u274C Context budget exhausted (${pctDisplay}%). ` +
+        `Only list_context_chunks, prune_chunks, and restore_chunks are allowed. ` +
+        `Prune chunks to free space, or end your response.`,
+    };
+  }
+  return { shouldBlock: false, message: null };
+}
+
+/** Check for degenerate consecutive prune streaks. */
+export function checkPruneStreak(
+  consecutiveCount: number,
+  batchSize: number,
+  maxConsecutive: number,
+): { shouldWarn: boolean; message: string | null } {
+  if (consecutiveCount > maxConsecutive) {
+    return {
+      shouldWarn: true,
+      message:
+        `\u26A0\uFE0F You have called prune_chunks ${consecutiveCount} times in a row. ` +
+        `Batch your pruning \u2014 pass all chunk ids in a single call instead of ` +
+        `pruning one at a time.`,
+    };
+  }
+  return { shouldWarn: false, message: null };
+}
+
 // ---------------------------------------------------------------------------
 // ChunkTracker
 // ---------------------------------------------------------------------------
