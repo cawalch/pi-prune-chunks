@@ -477,55 +477,65 @@ describe("contextFooter", () => {
 });
 
 describe("softThresholdCheck", () => {
-  test("no warning below threshold", () => {
-    const result = softThresholdCheck(14000, 32768, 43, 0.5, false);
+  test("no warning below all tiers", () => {
+    const result = softThresholdCheck(14000, 32768, 43, -1);
     assert.equal(result.shouldWarn, false);
-    assert.equal(result.isActive, false);
+    assert.equal(result.currentTier, -1);
     assert.equal(result.message, null);
   });
 
-  test("warning fires when crossing threshold", () => {
-    const result = softThresholdCheck(17000, 32768, 52, 0.5, false);
+  test("warning fires when crossing tier 0 (50%)", () => {
+    const result = softThresholdCheck(17000, 32768, 52, -1);
     assert.equal(result.shouldWarn, true);
-    assert.equal(result.isActive, true);
+    assert.equal(result.currentTier, 0);
     assert.ok(result.message!.includes("52%"));
+    assert.ok(result.message!.includes("consider"));
     assert.ok(result.message!.includes("prune_chunks"));
   });
 
-  test("no repeat warning while already active (hysteresis)", () => {
-    const result = softThresholdCheck(18000, 32768, 55, 0.5, true);
+  test("no repeat warning at same tier", () => {
+    const result = softThresholdCheck(18000, 32768, 55, 0);
     assert.equal(result.shouldWarn, false);
-    assert.equal(result.isActive, true);
+    assert.equal(result.currentTier, 0);
   });
 
-  test("resets when usage drops below threshold", () => {
-    const result = softThresholdCheck(14000, 32768, 43, 0.5, true);
-    assert.equal(result.shouldWarn, false);
-    assert.equal(result.isActive, false);
-  });
-
-  test("re-warns after reset and re-crossing", () => {
-    const reset = softThresholdCheck(14000, 32768, 43, 0.5, true);
-    assert.equal(reset.isActive, false);
-    const rewarn = softThresholdCheck(17000, 32768, 52, 0.5, reset.isActive);
-    assert.equal(rewarn.shouldWarn, true);
-    assert.equal(rewarn.isActive, true);
-  });
-
-  test("respects custom threshold", () => {
-    const result = softThresholdCheck(14000, 32768, 43, 0.3, false);
+  test("escalates to tier 1 (70%)", () => {
+    const result = softThresholdCheck(24000, 32768, 73, 0);
     assert.equal(result.shouldWarn, true);
-    assert.ok(result.message!.includes("43%"));
+    assert.equal(result.currentTier, 1);
+    assert.ok(result.message!.includes("73%"));
+    assert.ok(result.message!.includes("recommended"));
+  });
+
+  test("escalates to tier 2 (85%)", () => {
+    const result = softThresholdCheck(29000, 32768, 88, 1);
+    assert.equal(result.shouldWarn, true);
+    assert.equal(result.currentTier, 2);
+    assert.ok(result.message!.includes("88%"));
+    assert.ok(result.message!.includes("strongly recommended"));
+  });
+
+  test("can skip tiers if usage jumps", () => {
+    const result = softThresholdCheck(29000, 32768, 88, -1);
+    assert.equal(result.shouldWarn, true);
+    assert.equal(result.currentTier, 2);
+    assert.ok(result.message!.includes("88%"));
+  });
+
+  test("no warning when already at highest tier", () => {
+    const result = softThresholdCheck(29000, 32768, 88, 2);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.currentTier, 2);
   });
 
   test("returns safe defaults when percent is null", () => {
-    const result = softThresholdCheck(null, undefined, null, 0.5, false);
+    const result = softThresholdCheck(null, undefined, null, -1);
     assert.equal(result.shouldWarn, false);
-    assert.equal(result.isActive, false);
+    assert.equal(result.currentTier, -1);
   });
 
   test("computes from tokens when percent is null", () => {
-    const result = softThresholdCheck(17000, 32768, null, 0.5, false);
+    const result = softThresholdCheck(17000, 32768, null, -1);
     assert.equal(result.shouldWarn, true);
     assert.ok(result.message!.includes("52%"));
   });

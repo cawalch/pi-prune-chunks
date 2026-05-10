@@ -26,7 +26,7 @@ export default function (pi: ExtensionAPI) {
   const tracker = new ChunkTracker();
 
   // Threshold enforcement state
-  let softThresholdActive = false;
+  let lastWarnedTier = -1;
   let consecutivePruneCount = 0;
 
   // -----------------------------------------------------------------------
@@ -110,15 +110,14 @@ export default function (pi: ExtensionAPI) {
       ];
       modified = true;
 
-      // 3. Soft threshold warning — shift from exploration to selective retention
+      // 3. Soft threshold warning — escalate through tiers as context grows
       const softCheck = softThresholdCheck(
         usage.tokens,
         usage.contextWindow,
         usage.percent,
-        0.5,
-        softThresholdActive,
+        lastWarnedTier,
       );
-      softThresholdActive = softCheck.isActive;
+      lastWarnedTier = softCheck.currentTier;
       if (softCheck.shouldWarn && softCheck.message) {
         messages = [
           ...messages,
