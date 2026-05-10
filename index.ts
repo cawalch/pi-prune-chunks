@@ -11,7 +11,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { ChunkTracker, tombstoneFor } from "./src/tracker";
+import { ChunkTracker, contextFooter, tombstoneFor } from "./src/tracker";
 
 const STATE_TYPE = "prune-chunks-state";
 
@@ -59,24 +59,46 @@ export default function (pi: ExtensionAPI) {
   // Hook: context — replace pruned chunks with tombstones
   // -----------------------------------------------------------------------
 
-  pi.on("context", async (event, _ctx) => {
-    const prunedIds = tracker.prunedIds();
-    if (prunedIds.size === 0) return;
-
+  pi.on("context", async (event, ctx) => {
     let modified = false;
-    const messages = event.messages.map((msg) => {
-      if (msg.role !== "toolResult") return msg;
-      if (!prunedIds.has(msg.toolCallId)) return msg;
+    let messages = event.messages;
 
-      const chunk = tracker.get(msg.toolCallId);
-      if (!chunk) return msg;
+    // 1. Replace pruned chunks with tombstones
+    const prunedIds = tracker.prunedIds();
+    if (prunedIds.size > 0) {
+      messages = messages.map((msg) => {
+        if (msg.role !== "toolResult") return msg;
+        if (!prunedIds.has(msg.toolCallId)) return msg;
 
+        const chunk = tracker.get(msg.toolCallId);
+        if (!chunk) return msg;
+
+        modified = true;
+        return {
+          ...msg,
+          content: tombstoneFor(chunk),
+        };
+      });
+    }
+
+    // 2. Append context usage footer for agent visibility
+    const usage = ctx.getContextUsage();
+    if (usage) {
+      const summary = tracker.statusSummary();
+      const footer = contextFooter(usage.tokens, usage.limit, summary);
+
+      // Append as a user-scope tool result after the last message
+      // so the model sees it in its next observation
+      messages = [
+        ...messages,
+        {
+          role: "toolResult" as const,
+          toolCallId: "__prune_chunks_usage__",
+          content: [{ type: "text" as const, text: footer }],
+        },
+      ];
       modified = true;
-      return {
-        ...msg,
-        content: tombstoneFor(chunk),
-      };
-    });
+    }
 
     if (modified) {
       return { messages };
