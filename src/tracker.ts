@@ -132,6 +132,26 @@ export function contextFooter(
   );
 }
 
+/** Check if usage is above hard cutoff threshold. */
+export function hardThresholdCheck(
+  usedTokens: number,
+  limitTokens: number,
+  threshold: number,
+): { shouldBlock: boolean; message: string | null } {
+  const pct = usedTokens / limitTokens;
+  if (pct >= threshold) {
+    const pctDisplay = Math.round(pct * 100);
+    return {
+      shouldBlock: true,
+      message:
+        `\u274C Context budget exhausted (${pctDisplay}%). ` +
+        `Only list_context_chunks, prune_chunks, and restore_chunks are allowed. ` +
+        `Prune chunks to free space, or end your response.`,
+    };
+  }
+  return { shouldBlock: false, message: null };
+}
+
 /** Check if usage crosses the soft threshold and generate warning if so. */
 export function softThresholdCheck(
   usedTokens: number,

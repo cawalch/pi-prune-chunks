@@ -11,7 +11,13 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { ChunkTracker, contextFooter, softThresholdCheck, tombstoneFor } from "./src/tracker";
+import {
+  ChunkTracker,
+  contextFooter,
+  hardThresholdCheck,
+  softThresholdCheck,
+  tombstoneFor,
+} from "./src/tracker";
 
 const STATE_TYPE = "prune-chunks-state";
 
@@ -119,6 +125,27 @@ export default function (pi: ExtensionAPI) {
 
     if (modified) {
       return { messages };
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Hook: tool_call — hard cutoff enforcement near context limit
+  // -----------------------------------------------------------------------
+
+  const ALWAYS_ALLOWED_TOOLS = new Set(["list_context_chunks", "prune_chunks", "restore_chunks"]);
+
+  pi.on("tool_call", async (event, ctx) => {
+    if (ALWAYS_ALLOWED_TOOLS.has(event.toolName)) return;
+
+    const usage = ctx.getContextUsage();
+    if (!usage) return;
+
+    const check = hardThresholdCheck(usage.tokens, usage.limit, 0.9);
+    if (check.shouldBlock) {
+      return {
+        block: true,
+        reason: check.message!,
+      };
     }
   });
 

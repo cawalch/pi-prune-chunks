@@ -11,6 +11,7 @@ import {
   contentText,
   contextFooter,
   estimateTokens,
+  hardThresholdCheck,
   makeLabel,
   PRUNEABLE_TOOLS,
   softThresholdCheck,
@@ -482,5 +483,39 @@ describe("softThresholdCheck", () => {
     const result = softThresholdCheck(14000, 32768, 0.3, false);
     assert.equal(result.shouldWarn, true);
     assert.ok(result.message!.includes("43%"));
+  });
+});
+
+describe("hardThresholdCheck", () => {
+  test("does not block below threshold", () => {
+    const result = hardThresholdCheck(25000, 32768, 0.9);
+    assert.equal(result.shouldBlock, false);
+    assert.equal(result.message, null);
+  });
+
+  test("blocks at threshold", () => {
+    const result = hardThresholdCheck(30000, 32768, 0.9);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("92%"));
+    assert.ok(result.message!.includes("prune_chunks"));
+  });
+
+  test("blocks at 100%", () => {
+    const result = hardThresholdCheck(32768, 32768, 0.9);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("100%"));
+  });
+
+  test("respects custom threshold", () => {
+    const result = hardThresholdCheck(20000, 32768, 0.5);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("61%"));
+  });
+
+  test("message instructs agent to prune or conclude", () => {
+    const result = hardThresholdCheck(30000, 32768, 0.9);
+    assert.ok(result.message!.includes("end your response"));
+    assert.ok(result.message!.includes("prune_chunks"));
+    assert.ok(result.message!.includes("restore_chunks"));
   });
 });
