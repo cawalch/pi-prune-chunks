@@ -9,6 +9,7 @@ import test, { describe } from "node:test";
 import {
   ChunkTracker,
   contentText,
+  contextFooter,
   estimateTokens,
   makeLabel,
   PRUNEABLE_TOOLS,
@@ -389,5 +390,53 @@ describe("end-to-end prune and restore flow", () => {
     catalogueChunk(tracker2, "code_context", "dummy content for restoration testing", "call_001");
     tracker2.restorePrunedSet(meta);
     assert.equal(tracker2.get("call_001")!.pruned, true);
+  });
+});
+
+describe("contextFooter", () => {
+  test("formats usage footer with percentage and chunk stats", () => {
+    const footer = contextFooter(14203, 32768, {
+      total: 15,
+      pruned: 3,
+      totalTokens: 8000,
+      prunedTokens: 2000,
+    });
+    assert.ok(footer.includes("14203/32768"));
+    assert.ok(footer.includes("43%"));
+    assert.ok(footer.includes("15 tracked"));
+    assert.ok(footer.includes("3 pruned"));
+    assert.ok(footer.includes("~6000t active"));
+  });
+
+  test("handles zero usage", () => {
+    const footer = contextFooter(0, 32768, {
+      total: 0,
+      pruned: 0,
+      totalTokens: 0,
+      prunedTokens: 0,
+    });
+    assert.ok(footer.includes("0/32768"));
+    assert.ok(footer.includes("0%"));
+  });
+
+  test("handles near-full usage", () => {
+    const footer = contextFooter(30000, 32768, {
+      total: 20,
+      pruned: 10,
+      totalTokens: 10000,
+      prunedTokens: 5000,
+    });
+    assert.ok(footer.includes("92%"));
+    assert.ok(footer.includes("~5000t active"));
+  });
+
+  test("footer is compact — under 150 chars", () => {
+    const footer = contextFooter(14203, 32768, {
+      total: 15,
+      pruned: 3,
+      totalTokens: 8000,
+      prunedTokens: 2000,
+    });
+    assert.ok(footer.length < 150, `Footer too long: ${footer.length} chars`);
   });
 });

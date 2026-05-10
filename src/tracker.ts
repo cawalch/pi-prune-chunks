@@ -54,6 +54,22 @@ export type ListOutput = {
   }>;
 };
 
+/** Configurable thresholds for context budget enforcement. */
+export type ThresholdConfig = {
+  /** Fraction (0–1) at which to inject soft warnings. Default: 0.5 */
+  softThreshold: number;
+  /** Fraction (0–1) at which to block non-prune tool calls. Default: 0.9 */
+  hardThreshold: number;
+  /** Max consecutive prune calls before streak penalty. Default: 3 */
+  maxConsecutivePrunes: number;
+};
+
+export const DEFAULT_THRESHOLDS: ThresholdConfig = {
+  softThreshold: 0.5,
+  hardThreshold: 0.9,
+  maxConsecutivePrunes: 3,
+};
+
 // Tools that produce large, pruneable context
 export const PRUNEABLE_TOOLS = new Set([
   "code_context",
@@ -100,6 +116,20 @@ export function tombstoneFor(chunk: ToolChunk): Array<{ type: string; text: stri
       text: `[pruned:${chunk.id} ${chunk.toolName} "${chunk.label}" ~${chunk.estTokens}t — use restore_chunks to recover]`,
     },
   ];
+}
+
+/** Build a compact context-usage footer for agent visibility. */
+export function contextFooter(
+  usedTokens: number,
+  limitTokens: number,
+  summary: { total: number; pruned: number; totalTokens: number; prunedTokens: number },
+): string {
+  const pct = Math.round((usedTokens / limitTokens) * 100);
+  const activeTokens = summary.totalTokens - summary.prunedTokens;
+  return (
+    `[Context: ~${usedTokens}/${limitTokens} tokens (${pct}%) | ` +
+    `chunks: ${summary.total} tracked, ${summary.pruned} pruned, ~${activeTokens}t active]`
+  );
 }
 
 // ---------------------------------------------------------------------------
