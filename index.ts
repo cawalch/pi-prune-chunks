@@ -96,7 +96,7 @@ export default function (pi: ExtensionAPI) {
     const usage = ctx.getContextUsage();
     if (usage) {
       const summary = tracker.statusSummary();
-      const footer = contextFooter(usage.tokens, usage.limit, summary);
+      const footer = contextFooter(usage.tokens, usage.contextWindow, usage.percent, summary);
 
       // Append as a user-scope tool result after the last message
       // so the model sees it in its next observation
@@ -111,7 +111,13 @@ export default function (pi: ExtensionAPI) {
       modified = true;
 
       // 3. Soft threshold warning — shift from exploration to selective retention
-      const softCheck = softThresholdCheck(usage.tokens, usage.limit, 0.5, softThresholdActive);
+      const softCheck = softThresholdCheck(
+        usage.tokens,
+        usage.contextWindow,
+        usage.percent,
+        0.5,
+        softThresholdActive,
+      );
       softThresholdActive = softCheck.isActive;
       if (softCheck.shouldWarn && softCheck.message) {
         messages = [
@@ -147,7 +153,7 @@ export default function (pi: ExtensionAPI) {
     const usage = ctx.getContextUsage();
     if (!usage) return;
 
-    const check = hardThresholdCheck(usage.tokens, usage.limit, 0.9);
+    const check = hardThresholdCheck(usage.tokens, usage.contextWindow, usage.percent, 0.9);
     if (check.shouldBlock) {
       return {
         block: true,
@@ -312,7 +318,7 @@ export default function (pi: ExtensionAPI) {
       let output = `Context chunks: ${summary.total} tracked, ${summary.pruned} pruned\n`;
       output += `Token estimate: ~${summary.totalTokens} total, ~${summary.prunedTokens} pruned (~${summary.totalTokens - summary.prunedTokens} active)\n`;
       if (usage) {
-        output += `Provider context: ~${usage.tokens} tokens used of ~${usage.limit}\n`;
+        output += `Provider context: ~${usage.tokens} tokens used of ~${usage.contextWindow}\n`;
       }
 
       const sorted = Object.entries(summary.activeByTool).sort((a, b) => b[1].tokens - a[1].tokens);

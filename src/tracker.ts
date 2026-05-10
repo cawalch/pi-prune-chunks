@@ -120,26 +120,43 @@ export function tombstoneFor(chunk: ToolChunk): Array<{ type: string; text: stri
 
 /** Build a compact context-usage footer for agent visibility. */
 export function contextFooter(
-  usedTokens: number,
-  limitTokens: number,
+  usedTokens: number | null | undefined,
+  contextWindow: number | null | undefined,
+  percent: number | null | undefined,
   summary: { total: number; pruned: number; totalTokens: number; prunedTokens: number },
 ): string {
-  const pct = Math.round((usedTokens / limitTokens) * 100);
+  const computedPct =
+    percent != null
+      ? percent / 100
+      : usedTokens != null && contextWindow
+        ? usedTokens / contextWindow
+        : null;
+  const pctDisplay = computedPct != null ? `${Math.round(computedPct * 100)}%` : "?%";
   const activeTokens = summary.totalTokens - summary.prunedTokens;
+  const tokenStr = usedTokens != null ? `~${usedTokens}` : "?";
+  const windowStr = contextWindow != null ? `${contextWindow}` : "?";
   return (
-    `[Context: ~${usedTokens}/${limitTokens} tokens (${pct}%) | ` +
+    `[Context: ${tokenStr}/${windowStr} tokens (${pctDisplay}) | ` +
     `chunks: ${summary.total} tracked, ${summary.pruned} pruned, ~${activeTokens}t active]`
   );
 }
 
 /** Check if usage crosses the soft threshold and generate warning if so. */
 export function softThresholdCheck(
-  usedTokens: number,
-  limitTokens: number,
+  usedTokens: number | null | undefined,
+  contextWindow: number | null | undefined,
+  percent: number | null | undefined,
   threshold: number,
   wasActive: boolean,
 ): { shouldWarn: boolean; isActive: boolean; message: string | null } {
-  const pct = usedTokens / limitTokens;
+  const pct =
+    percent != null
+      ? percent / 100
+      : usedTokens != null && contextWindow
+        ? usedTokens / contextWindow
+        : null;
+  if (pct == null) return { shouldWarn: false, isActive: false, message: null };
+
   const isActive = pct >= threshold;
 
   if (isActive && !wasActive) {
@@ -158,11 +175,19 @@ export function softThresholdCheck(
 
 /** Check if usage is above hard cutoff threshold. */
 export function hardThresholdCheck(
-  usedTokens: number,
-  limitTokens: number,
+  usedTokens: number | null | undefined,
+  contextWindow: number | null | undefined,
+  percent: number | null | undefined,
   threshold: number,
 ): { shouldBlock: boolean; message: string | null } {
-  const pct = usedTokens / limitTokens;
+  const pct =
+    percent != null
+      ? percent / 100
+      : usedTokens != null && contextWindow
+        ? usedTokens / contextWindow
+        : null;
+  if (pct == null) return { shouldBlock: false, message: null };
+
   if (pct >= threshold) {
     const pctDisplay = Math.round(pct * 100);
     return {
@@ -179,7 +204,7 @@ export function hardThresholdCheck(
 /** Check for degenerate consecutive prune streaks. */
 export function checkPruneStreak(
   consecutiveCount: number,
-  batchSize: number,
+  _batchSize: number,
   maxConsecutive: number,
 ): { shouldWarn: boolean; message: string | null } {
   if (consecutiveCount > maxConsecutive) {
