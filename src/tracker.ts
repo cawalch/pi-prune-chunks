@@ -141,36 +141,58 @@ export function contextFooter(
   );
 }
 
-/** Check if usage crosses the soft threshold and generate warning if so. */
+/** A soft threshold tier with a threshold fraction and urgency label. */
+export type SoftThresholdTier = {
+  /** Fraction (0–1) at which this tier triggers. */
+  threshold: number;
+  /** Urgency label for the warning message. */
+  urgency: string;
+};
+
+/** Tier thresholds for escalating soft warnings. */
+export const SOFT_THRESHOLD_TIERS: SoftThresholdTier[] = [
+  { threshold: 0.5, urgency: "Consider" },
+  { threshold: 0.7, urgency: "Recommended" },
+  { threshold: 0.85, urgency: "Strongly recommended" },
+];
+
+/** Check if usage crosses a new soft threshold tier and generate warning if so. */
 export function softThresholdCheck(
   usedTokens: number | null | undefined,
   contextWindow: number | null | undefined,
   percent: number | null | undefined,
-  threshold: number,
-  wasActive: boolean,
-): { shouldWarn: boolean; isActive: boolean; message: string | null } {
+  lastWarnedTier: number,
+): { shouldWarn: boolean; currentTier: number; message: string | null } {
   const pct =
     percent != null
       ? percent / 100
       : usedTokens != null && contextWindow
         ? usedTokens / contextWindow
         : null;
-  if (pct == null) return { shouldWarn: false, isActive: false, message: null };
+  if (pct == null) return { shouldWarn: false, currentTier: -1, message: null };
 
-  const isActive = pct >= threshold;
+  // Find the highest tier whose threshold is crossed
+  let crossedTier = -1;
+  for (let i = 0; i < SOFT_THRESHOLD_TIERS.length; i++) {
+    if (pct >= SOFT_THRESHOLD_TIERS[i].threshold) {
+      crossedTier = i;
+    }
+  }
 
-  if (isActive && !wasActive) {
+  // Only warn when we enter a tier we haven't warned about yet
+  if (crossedTier > lastWarnedTier) {
+    const tier = SOFT_THRESHOLD_TIERS[crossedTier];
     const pctDisplay = Math.round(pct * 100);
     return {
       shouldWarn: true,
-      isActive: true,
+      currentTier: crossedTier,
       message:
-        `\u26A0\uFE0F Context usage at ${pctDisplay}%. Consider pruning chunks with ` +
-        `list_context_chunks + prune_chunks to free space, or provide your final answer.`,
+        `\u26A0\uFE0F Context usage at ${pctDisplay}% (${tier.urgency.toLowerCase()} pruning). ` +
+        `Use list_context_chunks + prune_chunks to free space, or provide your final answer.`,
     };
   }
 
-  return { shouldWarn: false, isActive, message: null };
+  return { shouldWarn: false, currentTier: crossedTier, message: null };
 }
 
 /** Check if usage is above hard cutoff threshold. */
