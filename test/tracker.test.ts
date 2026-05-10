@@ -398,7 +398,7 @@ describe("end-to-end prune and restore flow", () => {
 
 describe("contextFooter", () => {
   test("formats usage footer with percentage and chunk stats", () => {
-    const footer = contextFooter(14203, 32768, {
+    const footer = contextFooter(14203, 32768, 43, {
       total: 15,
       pruned: 3,
       totalTokens: 8000,
@@ -412,7 +412,7 @@ describe("contextFooter", () => {
   });
 
   test("handles zero usage", () => {
-    const footer = contextFooter(0, 32768, {
+    const footer = contextFooter(0, 32768, 0, {
       total: 0,
       pruned: 0,
       totalTokens: 0,
@@ -423,7 +423,7 @@ describe("contextFooter", () => {
   });
 
   test("handles near-full usage", () => {
-    const footer = contextFooter(30000, 32768, {
+    const footer = contextFooter(30000, 32768, 92, {
       total: 20,
       pruned: 10,
       totalTokens: 10000,
@@ -434,7 +434,7 @@ describe("contextFooter", () => {
   });
 
   test("footer is compact — under 150 chars", () => {
-    const footer = contextFooter(14203, 32768, {
+    const footer = contextFooter(14203, 32768, 43, {
       total: 15,
       pruned: 3,
       totalTokens: 8000,
@@ -442,18 +442,50 @@ describe("contextFooter", () => {
     });
     assert.ok(footer.length < 150, `Footer too long: ${footer.length} chars`);
   });
+
+  test("computes percentage when percent is null", () => {
+    const footer = contextFooter(16000, 32768, null, {
+      total: 5,
+      pruned: 0,
+      totalTokens: 3000,
+      prunedTokens: 0,
+    });
+    assert.ok(footer.includes("49%"));
+  });
+
+  test("handles null tokens gracefully", () => {
+    const footer = contextFooter(null, 32768, null, {
+      total: 5,
+      pruned: 0,
+      totalTokens: 3000,
+      prunedTokens: 0,
+    });
+    assert.ok(footer.includes("?/32768"));
+    assert.ok(footer.includes("?%"));
+  });
+
+  test("handles undefined contextWindow gracefully", () => {
+    const footer = contextFooter(155000, undefined, null, {
+      total: 5,
+      pruned: 0,
+      totalTokens: 3000,
+      prunedTokens: 0,
+    });
+    assert.ok(footer.includes("?"));
+    assert.ok(!footer.includes("NaN"));
+  });
 });
 
 describe("softThresholdCheck", () => {
   test("no warning below threshold", () => {
-    const result = softThresholdCheck(14000, 32768, 0.5, false);
+    const result = softThresholdCheck(14000, 32768, 43, 0.5, false);
     assert.equal(result.shouldWarn, false);
     assert.equal(result.isActive, false);
     assert.equal(result.message, null);
   });
 
   test("warning fires when crossing threshold", () => {
-    const result = softThresholdCheck(17000, 32768, 0.5, false);
+    const result = softThresholdCheck(17000, 32768, 52, 0.5, false);
     assert.equal(result.shouldWarn, true);
     assert.equal(result.isActive, true);
     assert.ok(result.message!.includes("52%"));
@@ -461,63 +493,86 @@ describe("softThresholdCheck", () => {
   });
 
   test("no repeat warning while already active (hysteresis)", () => {
-    const result = softThresholdCheck(18000, 32768, 0.5, true);
+    const result = softThresholdCheck(18000, 32768, 55, 0.5, true);
     assert.equal(result.shouldWarn, false);
     assert.equal(result.isActive, true);
   });
 
   test("resets when usage drops below threshold", () => {
-    const result = softThresholdCheck(14000, 32768, 0.5, true);
+    const result = softThresholdCheck(14000, 32768, 43, 0.5, true);
     assert.equal(result.shouldWarn, false);
     assert.equal(result.isActive, false);
   });
 
   test("re-warns after reset and re-crossing", () => {
-    const reset = softThresholdCheck(14000, 32768, 0.5, true);
+    const reset = softThresholdCheck(14000, 32768, 43, 0.5, true);
     assert.equal(reset.isActive, false);
-    const rewarn = softThresholdCheck(17000, 32768, 0.5, reset.isActive);
+    const rewarn = softThresholdCheck(17000, 32768, 52, 0.5, reset.isActive);
     assert.equal(rewarn.shouldWarn, true);
     assert.equal(rewarn.isActive, true);
   });
 
   test("respects custom threshold", () => {
-    const result = softThresholdCheck(14000, 32768, 0.3, false);
+    const result = softThresholdCheck(14000, 32768, 43, 0.3, false);
     assert.equal(result.shouldWarn, true);
     assert.ok(result.message!.includes("43%"));
+  });
+
+  test("returns safe defaults when percent is null", () => {
+    const result = softThresholdCheck(null, undefined, null, 0.5, false);
+    assert.equal(result.shouldWarn, false);
+    assert.equal(result.isActive, false);
+  });
+
+  test("computes from tokens when percent is null", () => {
+    const result = softThresholdCheck(17000, 32768, null, 0.5, false);
+    assert.equal(result.shouldWarn, true);
+    assert.ok(result.message!.includes("52%"));
   });
 });
 
 describe("hardThresholdCheck", () => {
   test("does not block below threshold", () => {
-    const result = hardThresholdCheck(25000, 32768, 0.9);
+    const result = hardThresholdCheck(25000, 32768, 76, 0.9);
     assert.equal(result.shouldBlock, false);
     assert.equal(result.message, null);
   });
 
   test("blocks at threshold", () => {
-    const result = hardThresholdCheck(30000, 32768, 0.9);
+    const result = hardThresholdCheck(30000, 32768, 92, 0.9);
     assert.equal(result.shouldBlock, true);
     assert.ok(result.message!.includes("92%"));
     assert.ok(result.message!.includes("prune_chunks"));
   });
 
   test("blocks at 100%", () => {
-    const result = hardThresholdCheck(32768, 32768, 0.9);
+    const result = hardThresholdCheck(32768, 32768, 100, 0.9);
     assert.equal(result.shouldBlock, true);
     assert.ok(result.message!.includes("100%"));
   });
 
   test("respects custom threshold", () => {
-    const result = hardThresholdCheck(20000, 32768, 0.5);
+    const result = hardThresholdCheck(20000, 32768, 61, 0.5);
     assert.equal(result.shouldBlock, true);
     assert.ok(result.message!.includes("61%"));
   });
 
   test("message instructs agent to prune or conclude", () => {
-    const result = hardThresholdCheck(30000, 32768, 0.9);
+    const result = hardThresholdCheck(30000, 32768, 92, 0.9);
     assert.ok(result.message!.includes("end your response"));
     assert.ok(result.message!.includes("prune_chunks"));
     assert.ok(result.message!.includes("restore_chunks"));
+  });
+
+  test("returns safe defaults when percent is null", () => {
+    const result = hardThresholdCheck(null, undefined, null, 0.9);
+    assert.equal(result.shouldBlock, false);
+  });
+
+  test("computes from tokens when percent is null", () => {
+    const result = hardThresholdCheck(30000, 32768, null, 0.9);
+    assert.equal(result.shouldBlock, true);
+    assert.ok(result.message!.includes("92%"));
   });
 });
 
