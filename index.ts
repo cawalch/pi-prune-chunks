@@ -98,14 +98,14 @@ export default function (pi: ExtensionAPI) {
       const summary = tracker.statusSummary();
       const footer = contextFooter(usage.tokens, usage.contextWindow, usage.percent, summary);
 
-      // Append as a user-scope tool result after the last message
-      // so the model sees it in its next observation
+      // Append as a user message so the model sees it in its next observation.
+      // Must use role "user" — fake toolResult messages with no matching tool_use
+      // cause a 400 from strict providers (Anthropic Claude API).
       messages = [
         ...messages,
         {
-          role: "toolResult" as const,
-          toolCallId: "__prune_chunks_usage__",
-          content: [{ type: "text" as const, text: footer }],
+          role: "user" as const,
+          content: footer,
         },
       ];
       modified = true;
@@ -122,9 +122,8 @@ export default function (pi: ExtensionAPI) {
         messages = [
           ...messages,
           {
-            role: "toolResult" as const,
-            toolCallId: "__prune_chunks_soft_warning__",
-            content: [{ type: "text" as const, text: softCheck.message }],
+            role: "user" as const,
+            content: softCheck.message,
           },
         ];
       }
