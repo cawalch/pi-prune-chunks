@@ -92,23 +92,16 @@ export default function (pi: ExtensionAPI) {
       });
     }
 
-    // 2. Append context usage footer for agent visibility
+    // 2. Show context usage in TUI footer bar + notify on threshold escalation
     const usage = ctx.getContextUsage();
     if (usage) {
       const summary = tracker.statusSummary();
       const footer = contextFooter(usage.tokens, usage.contextWindow, usage.percent, summary);
 
-      // Append as a user message so the model sees it in its next observation.
-      // Must use role "user" — fake toolResult messages with no matching tool_use
-      // cause a 400 from strict providers (Anthropic Claude API).
-      messages = [
-        ...messages,
-        {
-          role: "user" as const,
-          content: footer,
-        },
-      ];
-      modified = true;
+      // TUI footer status bar — always visible to the user, not injected into messages
+      if (ctx.hasUI) {
+        ctx.ui.setStatus("prune-chunks", footer);
+      }
 
       // 3. Soft threshold warning — escalate through tiers as context grows
       const softCheck = softThresholdCheck(
@@ -118,14 +111,8 @@ export default function (pi: ExtensionAPI) {
         lastWarnedTier,
       );
       lastWarnedTier = softCheck.currentTier;
-      if (softCheck.shouldWarn && softCheck.message) {
-        messages = [
-          ...messages,
-          {
-            role: "user" as const,
-            content: softCheck.message,
-          },
-        ];
+      if (softCheck.shouldWarn && softCheck.message && ctx.hasUI) {
+        ctx.ui.notify(softCheck.message, "warn");
       }
     }
 
