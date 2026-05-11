@@ -154,6 +154,14 @@ export default function (pi: ExtensionAPI) {
 
     const check = hardThresholdCheck(usage.tokens, usage.contextWindow, usage.percent, 0.9);
     if (check.shouldBlock) {
+      // If all tracked chunks are already pruned, there's nothing left to free.
+      // Lifting the block avoids a deadlock where the agent can't prune further
+      // but also can't proceed with any other tool.
+      const summary = tracker.statusSummary();
+      if (summary.total > 0 && summary.pruned >= summary.total) {
+        return; // allow the call through
+      }
+
       return {
         block: true,
         reason: check.message!,
