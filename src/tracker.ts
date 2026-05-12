@@ -441,6 +441,35 @@ export class ChunkTracker {
     };
   }
 
+  /** Reset all in-memory state (for session shutdown). */
+  reset(): void {
+    this.chunks.clear();
+  }
+
+  /** Find chunks older than the given age (ms). Returns ids. */
+  idsOlderThan(ageMs: number, opts?: { toolName?: string; onlyActive?: boolean }): string[] {
+    const cutoff = Date.now() - ageMs;
+    const ids: string[] = [];
+    for (const chunk of this.chunks.values()) {
+      if (opts?.toolName && chunk.toolName !== opts.toolName) continue;
+      if (opts?.onlyActive && chunk.pruned) continue;
+      if (chunk.timestamp < cutoff) {
+        ids.push(chunk.id);
+      }
+    }
+    return ids;
+  }
+
+  /** Find the largest active chunks (by token estimate). Returns ids. */
+  idsLargest(count: number, opts?: { toolName?: string }): string[] {
+    let entries = [...this.chunks.values()].filter((c) => !c.pruned);
+    if (opts?.toolName) {
+      entries = entries.filter((c) => c.toolName === opts.toolName);
+    }
+    entries.sort((a, b) => b.estTokens - a.estTokens);
+    return entries.slice(0, count).map((c) => c.id);
+  }
+
   /** Render list output as formatted text. */
   renderList(output: ListOutput): string {
     const lines = [
