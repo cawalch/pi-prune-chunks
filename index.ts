@@ -22,12 +22,101 @@ import {
 
 const STATE_TYPE = "prune-chunks-state";
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const AGE_REGEX = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/;
+
+/** Parse a human-readable age string (e.g. '5m', '1h', '30s') into milliseconds. */
+export function parseAge(age: string): number | null {
+  const match = AGE_REGEX.exec(age.trim());
+  if (!match) return null;
+  const value = parseFloat(match[1]);
+  const unit = match[2] ?? "ms";
+  switch (unit) {
+    case "ms":
+      return value;
+    case "s":
+      return value * 1000;
+    case "m":
+      return value * 60 * 1000;
+    case "h":
+      return value * 60 * 60 * 1000;
+    default:
+      return null;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   const tracker = new ChunkTracker();
 
   // Threshold enforcement state
   let lastWarnedTier = -1;
   let consecutivePruneCount = 0;
+  // Tracks whether we've already suggested pruning this turn
+  let suggestedPruneThisTurn = false;
+
+  // -----------------------------------------------------------------------
+  // Hook: session_shutdown — clear in-memory state
+  // -----------------------------------------------------------------------
+
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    tracker.reset();
+    lastWarnedTier = -1;
+    consecutivePruneCount = 0;
+    suggestedPruneThisTurn = false;
+  });
+
+  // -----------------------------------------------------------------------
+  // Hook: model_select — reset threshold state on model change
+  // -----------------------------------------------------------------------
+
+  pi.on("model_select", async (_event, _ctx) => {
+    lastWarnedTier = -1;
+  });
+
+  // -----------------------------------------------------------------------
+  // Hook: turn_start — reset per-turn state
+  // -----------------------------------------------------------------------
+
+  pi.on("turn_start", async (_event, _ctx) => {
+    suggestedPruneThisTurn = false;
+  });
+
+  // -----------------------------------------------------------------------
+  // Hook: turn_end — proactive pruning suggestion
+  // -----------------------------------------------------------------------
+
+  pi.on("turn_end", async (_event, ctx) => {
+    if (suggestedPruneThisTurn) return;
+
+    const usage = ctx.getContextUsage();
+    if (!usage || !ctx.hasUI) return;
+
+    const pct =
+      usage.percent != null
+        ? usage.percent / 100
+        : usage.tokens != null && usage.contextWindow
+          ? usage.tokens / usage.contextWindow
+          : null;
+    if (pct == null) return;
+
+    // Suggest pruning when context is 70%+ and there are active chunks
+    if (pct >= 0.7) {
+      const summary = tracker.statusSummary();
+      const activeChunks = summary.total - summary.pruned;
+      if (activeChunks > 0) {
+        suggestedPruneThisTurn = true;
+        const pctDisplay = Math.round(pct * 100);
+        ctx.ui.notify(
+          `📊 Context at ${pctDisplay}% with ${activeChunks} active chunks. ` +
+            `Consider list_context_chunks → prune_chunks to free space.`,
+          "info",
+        );
+      }
+    }
+  });
 
   // -----------------------------------------------------------------------
   // Persistence
@@ -210,37 +299,107 @@ export default function (pi: ExtensionAPI) {
     description:
       "Replace the content of tracked tool-result chunks with compact tombstones, freeing " +
       "context tokens. Pruned chunks remain in the transcript but their content is replaced " +
-      "before each LLM call. Use list_context_chunks first to identify expendable chunks.",
-    promptSnippet: "Prune context chunks by id to free tokens",
+      "before each LLM call. Use list_context_chunks first to identify expendable chunks, " +
+      "or use olderThan/largest for convenience pruning.",
+    promptSnippet: "Prune context chunks by id, age, or size to free tokens",
     promptGuidelines: [
       "Use prune_chunks when context is getting large and earlier tool results are no longer needed.",
       "Always list_context_chunks before pruning to identify the right chunk ids.",
+      "For quick cleanup, use prune_chunks with olderThan (e.g. '5m') to prune stale exploration results.",
+      "Use prune_chunks with largest: N to prune the N biggest chunks by token estimate.",
       "Pruning is reversible — use restore_chunks to recover pruned content within the same session.",
       "Prefer pruning older chunks from completed exploration steps rather than recent ones.",
     ],
     parameters: Type.Object({
-      ids: Type.Array(
-        Type.String({ description: "Chunk ids to prune (from list_context_chunks)" }),
-        {
+      ids: Type.Optional(
+        Type.Array(Type.String({ description: "Chunk ids to prune (from list_context_chunks)" }), {
           description: "Array of chunk ids to prune",
-        },
+        }),
+      ),
+      olderThan: Type.Optional(
+        Type.String({
+          description:
+            "Prune active chunks older than this age (e.g. '5m', '1h', '30s'). " +
+            "Mutually exclusive with ids.",
+        }),
+      ),
+      largest: Type.Optional(
+        Type.Number({
+          description:
+            "Prune the N largest active chunks by token estimate. " +
+            "Mutually exclusive with ids.",
+        }),
+      ),
+      toolName: Type.Optional(
+        Type.String({
+          description: "Filter: only prune chunks from this tool (used with olderThan/largest)",
+        }),
       ),
       reason: Type.Optional(Type.String({ description: "Reason for pruning (for audit trail)" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+      // Resolve chunk ids from parameters
+      let ids: string[];
+      const reason = params.reason;
+
+      if (params.ids && params.ids.length > 0) {
+        ids = params.ids;
+      } else if (params.olderThan) {
+        const ageMs = parseAge(params.olderThan);
+        if (ageMs == null) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Invalid olderThan format: '${params.olderThan}'. Use e.g. '5m', '1h', '30s'.`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        ids = tracker.idsOlderThan(ageMs, {
+          toolName: params.toolName,
+          onlyActive: true,
+        });
+        if (ids.length === 0) {
+          return {
+            content: [{ type: "text", text: "No active chunks match the olderThan criteria." }],
+          };
+        }
+      } else if (params.largest != null && params.largest > 0) {
+        ids = tracker.idsLargest(params.largest, {
+          toolName: params.toolName,
+        });
+        if (ids.length === 0) {
+          return {
+            content: [{ type: "text", text: "No active chunks to prune." }],
+          };
+        }
+      } else {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Provide one of: ids, olderThan, or largest.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
       // Streak detection — enforce batching
       consecutivePruneCount++;
-      const streakResult = checkPruneStreak(consecutivePruneCount, params.ids.length, 3);
+      const streakResult = checkPruneStreak(consecutivePruneCount, ids.length, 3);
 
-      const results = tracker.prune(params.ids, params.reason);
+      const results = tracker.prune(ids, reason);
       const prunedResults = results.filter((r) => r.status === "pruned");
       const freedTokens = prunedResults.reduce((s, r) => s + r.tokens, 0);
 
       persistState();
 
       const lines = [
-        `Pruned ${prunedResults.length}/${params.ids.length} chunks, freed ~${freedTokens} tokens`,
+        `Pruned ${prunedResults.length}/${ids.length} chunks, freed ~${freedTokens} tokens`,
         "",
         ...results.map((r) => `  ${r.id.slice(0, 36)}: ${r.status} (~${r.tokens}t)`),
       ];
