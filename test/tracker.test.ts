@@ -71,7 +71,7 @@ describe("makeLabel", () => {
   test("truncates long first lines", () => {
     const longLine = "x".repeat(200);
     const label = makeLabel("code_search", longLine);
-    assert.ok(label.length <= 80 + "code_search: ".length + 1); // +1 for ellipsis char
+    assert.ok(label.length <= 120 + "code_search: ".length + 1); // +1 for ellipsis char
     assert.ok(label.endsWith("…"));
   });
 });

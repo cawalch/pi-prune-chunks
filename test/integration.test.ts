@@ -132,16 +132,16 @@ describe("makeLabel edge cases", () => {
     assert.ok(label.includes("flow_trace:"));
   });
 
-  test("exactly at truncation boundary (80 chars)", () => {
-    const exactly80 = "x".repeat(80);
-    const label = makeLabel("tool", exactly80);
-    // 80 chars shouldn't trigger truncation
+  test("exactly at truncation boundary (120 chars)", () => {
+    const exactly120 = "x".repeat(120);
+    const label = makeLabel("tool", exactly120);
+    // 120 chars shouldn't trigger truncation
     assert.ok(!label.includes("…"));
   });
 
-  test("81 chars triggers truncation", () => {
-    const str81 = "x".repeat(81);
-    const label = makeLabel("tool", str81);
+  test("121 chars triggers truncation", () => {
+    const str121 = "x".repeat(121);
+    const label = makeLabel("tool", str121);
     assert.ok(label.endsWith("…"));
   });
 });
@@ -835,9 +835,9 @@ describe("Extension hook simulation: context", () => {
     const tomb = tombstoneFor(chunk);
     const tombLen = tomb[0].text.length;
 
-    // Tombstone should be < 5% of original (significant savings)
+    // Tombstone should be < 7% of original (significant savings)
     assert.ok(
-      tombLen < bigText.length * 0.05,
+      tombLen < bigText.length * 0.07,
       `Tombstone ${tombLen} vs original ${bigText.length}`,
     );
   });

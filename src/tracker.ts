@@ -104,16 +104,20 @@ export function contentText(content: Array<{ type: string; text?: string }>): st
 
 export function makeLabel(toolName: string, content: string): string {
   const firstLine = content.split("\n").find((l) => l.trim().length > 0) ?? "";
-  const maxLen = 80;
+  const maxLen = 120;
   const truncated = firstLine.length > maxLen ? `${firstLine.slice(0, maxLen)}…` : firstLine;
   return `${toolName}: ${truncated}`;
 }
 
 export function tombstoneFor(chunk: ToolChunk): Array<{ type: string; text: string }> {
+  // Show full label (not truncated) to aid re-call decisions.
+  // The label contains the tool name + first line of output, which is usually
+  // enough to identify what was queried. If the agent needs the full result,
+  // they can either restore_chunks or re-run the tool using the label as context.
   return [
     {
       type: "text",
-      text: `[pruned:${chunk.id} ${chunk.toolName} "${chunk.label}" ~${chunk.estTokens}t — use restore_chunks to recover]`,
+      text: `[pruned:${chunk.id} ${chunk.toolName} "${chunk.label}" ~${chunk.estTokens}t — restore with restore_chunks, or re-run ${chunk.toolName} using the query in the label above]`,
     },
   ];
 }
