@@ -18,3 +18,8 @@ The extension entry point wires these layers into Pi hooks:
 
 The saved transcript remains the source of truth. Pruning state is metadata over
 that transcript, not a destructive transcript edit.
+
+The extension only manages tracked tool-result chunks. It reports provider
+tokens outside those chunks, but it does not compress the system prompt or
+ordinary conversation history. Long sessions that are dominated by non-chunk
+tokens need a separate conversation-level compression layer.

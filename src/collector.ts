@@ -25,6 +25,8 @@ type ToolResultInput = {
 };
 
 const REAMER_TOOL_KINDS: Record<string, ChunkKind> = {
+  code_overview: "outline",
+  repo_map: "outline",
   code_context: "context_pack",
   code_search: "search",
   code_search_symbols: "symbol",
