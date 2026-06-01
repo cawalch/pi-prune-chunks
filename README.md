@@ -146,6 +146,18 @@ Raw tool output is not persisted to disk by default.
 - File-read pruning is cautious: instruction files, manifests, and common
   entrypoints are high risk, while unbounded whole-file reads wait for a higher
   pressure band than searches or context packs.
+- Working-context protection: chunks whose source path is mentioned in the
+  latest user or assistant message, or reported by Pi as modified, are protected
+  from auto-prune and shown as protected in pressure reports.
+- Recent chunks are preserved conservatively at the start threshold, then the
+  protected recent window narrows under pressure and drops away in the
+  high-pressure band so auto-prune can keep working toward the configured target.
+- Pressure reports show non-chunk provider tokens and call out when the target
+  cannot be reached by pruning tracked chunks alone.
+- Exact duplicate tool outputs are scored higher as prune candidates.
+- Scope boundary: this extension prunes tracked tool-result chunks, not system
+  prompts or ordinary conversation history. If non-chunk overhead dominates,
+  conversation-level compression is a separate mechanism.
 - Transparent: every pruned chunk leaves a tombstone with ID, kind, tool, label,
   token estimate, optional summary, and restore hint.
 

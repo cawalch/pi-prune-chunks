@@ -22,6 +22,7 @@ import type {
   ContentBlock,
   ContextUsage,
   PersistedPruneChunksState,
+  PreserveContext,
   PruneChunksConfig,
 } from "./src/types";
 
@@ -57,8 +58,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("context", async (event, ctx) => {
     const usage = getUsage(ctx);
-    const preserveIds = idsReferencedByLatestAssistant(event.messages ?? []);
-    const pruneResult = autoPrune(registry, usage, config, { preserveIds });
+    const preserve = preserveContext(event.messages ?? [], ctx);
+    const pruneResult = autoPrune(registry, usage, config, { preserve });
     if (pruneResult.pruned.some((result) => result.status === "pruned")) {
       persistState();
       if (ctx?.hasUI) {
@@ -226,7 +227,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const usage = getUsage(ctx);
-      const pressure = renderPressure(registry, usage, config);
+      const pressure = renderPressure(registry, usage, config, preserveContext([], ctx));
       return {
         content: [{ type: "text", text: pressure }],
         details: { pressure },
@@ -246,7 +247,7 @@ function registerCommands(
   pi.registerCommand("prune-status", {
     description: "Show context chunk tracking and pruning status",
     async run(_args, ctx) {
-      notify(ctx, renderPressure(registry, getUsage(ctx), config));
+      notify(ctx, renderPressure(registry, getUsage(ctx), config, preserveContext([], ctx)));
     },
   });
 
@@ -266,7 +267,15 @@ function registerCommands(
     async run(args, ctx) {
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
-      notify(ctx, renderCandidates(suggestPruneCandidates(registry, config, { limit })));
+      notify(
+        ctx,
+        renderCandidates(
+          suggestPruneCandidates(registry, config, {
+            limit,
+            preserve: preserveContext([], ctx),
+          }),
+        ),
+      );
     },
   });
 
@@ -278,6 +287,7 @@ function registerCommands(
       const target = numberOption(parsed, "--target");
       const candidates = suggestPruneCandidates(registry, config, {
         limit: config.autoPrune.maxChunksPerPass,
+        preserve: preserveContext([], ctx),
       });
       const ids = pickCandidateIds(
         candidates,
@@ -358,18 +368,83 @@ function getUsage(ctx: unknown): ContextUsage | null {
   return typeof getter === "function" ? getter.call(ctx) : null;
 }
 
-function idsReferencedByLatestAssistant(
+export function preserveContext(
   messages: Array<{ role: string; content?: ContentBlock[] }>,
-): Set<string> {
+  ctx: unknown,
+): PreserveContext {
+  const text = latestUserAndAssistantText(messages);
+  return {
+    ids: new Set(text.match(/pc_[0-9a-z]+_[0-9a-f]{6}/g) ?? []),
+    paths: new Set([...pathsReferencedInText(text), ...modifiedPaths(ctx)].map(normalizePath)),
+  };
+}
+
+function latestUserAndAssistantText(
+  messages: Array<{ role: string; content?: ContentBlock[] }>,
+): string {
+  const parts: string[] = [];
+  let sawAssistant = false;
+  let sawUser = false;
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (message.role !== "assistant") continue;
-    const text = normalizeContent(message.content)
-      .map((block) => block.text ?? "")
-      .join("\n");
-    return new Set(text.match(/pc_[0-9a-z]+_[0-9a-f]{6}/g) ?? []);
+    if (message.role === "assistant" && !sawAssistant) {
+      parts.push(
+        normalizeContent(message.content)
+          .map((block) => block.text ?? "")
+          .join("\n"),
+      );
+      sawAssistant = true;
+    } else if (message.role === "user" && !sawUser) {
+      parts.push(
+        normalizeContent(message.content)
+          .map((block) => block.text ?? "")
+          .join("\n"),
+      );
+      sawUser = true;
+    }
+    if (sawAssistant && sawUser) break;
   }
-  return new Set();
+  return parts.join("\n");
+}
+
+function pathsReferencedInText(text: string): string[] {
+  const matches = text.match(
+    /(?:^|[\s"'(`])((?:\.\/|\.\.\/|\/)?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)/gm,
+  );
+  if (!matches) return [];
+  return matches.map((match) => match.trim().replace(/^["'(`]+|[),.;:"'`]+$/g, "")).filter(Boolean);
+}
+
+function modifiedPaths(ctx: unknown): string[] {
+  const values = [
+    (ctx as { modifiedFiles?: unknown } | undefined)?.modifiedFiles,
+    (ctx as { modifiedFilePaths?: unknown } | undefined)?.modifiedFilePaths,
+    (ctx as { git?: { modifiedFiles?: unknown; modifiedFilePaths?: unknown } } | undefined)?.git
+      ?.modifiedFiles,
+    (ctx as { git?: { modifiedFiles?: unknown; modifiedFilePaths?: unknown } } | undefined)?.git
+      ?.modifiedFilePaths,
+  ];
+
+  const paths: string[] = [];
+  for (const value of values) {
+    if (!Array.isArray(value)) continue;
+    for (const item of value) {
+      if (typeof item === "string") {
+        paths.push(item);
+      } else if (item && typeof item === "object") {
+        const pathValue =
+          (item as { path?: unknown }).path ??
+          (item as { file?: unknown }).file ??
+          (item as { filePath?: unknown }).filePath;
+        if (typeof pathValue === "string") paths.push(pathValue);
+      }
+    }
+  }
+  return paths;
+}
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 }
 
 function currentWorkingDirectory(ctx: unknown): string | undefined {

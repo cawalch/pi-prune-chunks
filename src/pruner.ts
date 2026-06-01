@@ -1,5 +1,11 @@
 import type { ChunkRegistry } from "./registry";
-import type { ChunkActionResult, ContextChunk, ContextUsage, PruneChunksConfig } from "./types";
+import type {
+  ChunkActionResult,
+  ContextChunk,
+  ContextUsage,
+  PreserveContext,
+  PruneChunksConfig,
+} from "./types";
 
 export type PruneCandidate = {
   id: string;
@@ -9,6 +15,15 @@ export type PruneCandidate = {
   tokenEstimate: number;
   score: number;
   reasons: string[];
+};
+
+export type BlockedPruneCandidate = {
+  id: string;
+  label: string;
+  kind: string;
+  risk: string;
+  tokenEstimate: number;
+  reason: string;
 };
 
 export type AutoPruneResult = {
@@ -33,25 +48,30 @@ export function suggestPruneCandidates(
   options: {
     now?: number;
     limit?: number;
-    preserveIds?: Set<string>;
+    preserve?: PreserveContext;
     pressurePercent?: number | null;
   } = {},
 ): PruneCandidate[] {
   const now = options.now ?? Date.now();
-  const recentProtected = recentChunkIds(registry.active(), config.autoPrune.preserveRecentChunks);
+  const active = registry.active();
+  const recentProtected = recentChunkIds(
+    active,
+    protectedRecentChunkCount(config, options.pressurePercent),
+  );
+  const duplicateHashes = duplicateContentHashes(active);
   const candidates: PruneCandidate[] = [];
 
-  for (const chunk of registry.active()) {
+  for (const chunk of active) {
     const blockedReason = autoPruneBlockedReason(
       chunk,
       config,
       now,
       recentProtected,
-      options.preserveIds,
+      options.preserve,
       options.pressurePercent,
     );
     if (blockedReason) continue;
-    candidates.push(scoreCandidate(chunk, now));
+    candidates.push(scoreCandidate(chunk, now, duplicateHashes));
   }
 
   candidates.sort((a, b) => b.score - a.score || b.tokenEstimate - a.tokenEstimate);
@@ -62,7 +82,7 @@ export function autoPrune(
   registry: ChunkRegistry,
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
-  options: { now?: number; preserveIds?: Set<string> } = {},
+  options: { now?: number; preserve?: PreserveContext } = {},
 ): AutoPruneResult {
   if (!config.autoPrune.enabled) return { triggered: false, pruned: [], savedTokens: 0 };
 
@@ -81,7 +101,7 @@ export function autoPrune(
   const candidates = suggestPruneCandidates(registry, config, {
     now: options.now,
     limit: config.autoPrune.maxChunksPerPass,
-    preserveIds: options.preserveIds,
+    preserve: options.preserve,
     pressurePercent: pct,
   });
 
@@ -116,6 +136,7 @@ export function pressureSummary(
   registry: ChunkRegistry,
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
+  preserve?: PreserveContext,
 ): {
   estimatedActiveChunkTokens: number;
   estimatedPrunedTokens: number;
@@ -127,10 +148,21 @@ export function pressureSummary(
     targetPercent: number;
     minChunkTokens: number;
     maxChunksPerPass: number;
+    nonChunkTokens: number | null;
+    bestPossiblePercent: number | null;
+    targetReachableByChunks: boolean | null;
   };
   recommendedCandidates: PruneCandidate[];
+  blockedCandidates: BlockedPruneCandidate[];
 } {
   const summary = registry.summary();
+  const pct = contextPercent(usage);
+  const nonChunkTokens =
+    usage?.tokens != null ? Math.max(0, usage.tokens - summary.activeTokens) : null;
+  const bestPossiblePercent =
+    nonChunkTokens != null && usage?.contextWindow
+      ? (nonChunkTokens / usage.contextWindow) * 100
+      : null;
   return {
     estimatedActiveChunkTokens: summary.activeTokens,
     estimatedPrunedTokens: summary.prunedTokens,
@@ -152,12 +184,63 @@ export function pressureSummary(
       targetPercent: config.autoPrune.targetPercent,
       minChunkTokens: config.autoPrune.minChunkTokens,
       maxChunksPerPass: config.autoPrune.maxChunksPerPass,
+      nonChunkTokens,
+      bestPossiblePercent,
+      targetReachableByChunks:
+        bestPossiblePercent == null ? null : bestPossiblePercent <= config.autoPrune.targetPercent,
     },
     recommendedCandidates: suggestPruneCandidates(registry, config, {
       limit: 10,
-      pressurePercent: contextPercent(usage),
+      pressurePercent: pct,
+      preserve,
+    }),
+    blockedCandidates: blockedPruneCandidates(registry, config, {
+      limit: 10,
+      pressurePercent: pct,
+      preserve,
     }),
   };
+}
+
+export function blockedPruneCandidates(
+  registry: ChunkRegistry,
+  config: PruneChunksConfig,
+  options: {
+    now?: number;
+    limit?: number;
+    preserve?: PreserveContext;
+    pressurePercent?: number | null;
+  } = {},
+): BlockedPruneCandidate[] {
+  const now = options.now ?? Date.now();
+  const recentProtected = recentChunkIds(
+    registry.active(),
+    protectedRecentChunkCount(config, options.pressurePercent),
+  );
+  const blocked: BlockedPruneCandidate[] = [];
+
+  for (const chunk of registry.active()) {
+    const reason = autoPruneBlockedReason(
+      chunk,
+      config,
+      now,
+      recentProtected,
+      options.preserve,
+      options.pressurePercent,
+    );
+    if (!reason) continue;
+    blocked.push({
+      id: chunk.id,
+      label: chunk.label,
+      kind: chunk.kind,
+      risk: chunk.risk,
+      tokenEstimate: chunk.tokenEstimate,
+      reason,
+    });
+  }
+
+  blocked.sort((a, b) => b.tokenEstimate - a.tokenEstimate);
+  return blocked.slice(0, Math.max(0, options.limit ?? 10));
 }
 
 function autoPruneBlockedReason(
@@ -165,7 +248,7 @@ function autoPruneBlockedReason(
   config: PruneChunksConfig,
   now: number,
   recentProtected: Set<string>,
-  preserveIds?: Set<string>,
+  preserve?: PreserveContext,
   pressurePercent?: number | null,
 ): string | null {
   const relaxedForPressure =
@@ -177,16 +260,18 @@ function autoPruneBlockedReason(
   if (chunk.pruned) return "already pruned";
   if (chunk.pinned) return "pinned";
   if (chunk.risk === "high") return "high risk";
+  if (isPathPreserved(chunk, preserve?.paths)) return "referenced by active working context";
   if (
     chunk.kind === "file_read" &&
     chunk.risk === "medium" &&
+    chunk.source?.path &&
     (pressurePercent == null || pressurePercent < config.autoPrune.startAtPercent + 15)
   ) {
     return "unbounded file read below high-pressure threshold";
   }
   if (chunk.tokenEstimate < minChunkTokens) return "below token floor";
   if (recentProtected.has(chunk.id)) return "recent protected chunk";
-  if (preserveIds?.has(chunk.id)) return "referenced by latest assistant message";
+  if (preserve?.ids?.has(chunk.id)) return "referenced by latest assistant message";
   const preserveMs = config.autoPrune.preserveRecentMinutes * 60 * 1000;
   if (!relaxedForPressure && now - chunk.createdAt < preserveMs) return "created recently";
   if (chunk.lastRestoredAt != null && now - chunk.lastRestoredAt < preserveMs) {
@@ -195,11 +280,34 @@ function autoPruneBlockedReason(
   return null;
 }
 
-function scoreCandidate(chunk: ContextChunk, now: number): PruneCandidate {
+function isPathPreserved(chunk: ContextChunk, preservedPaths: Set<string> | undefined): boolean {
+  if (!chunk.source?.path || !preservedPaths || preservedPaths.size === 0) return false;
+  const chunkPath = normalizePath(chunk.source.path);
+  for (const preservedPath of preservedPaths) {
+    if (chunkPath === preservedPath) return true;
+    if (chunkPath.endsWith(`/${preservedPath}`)) return true;
+    if (preservedPath.endsWith(`/${chunkPath}`)) return true;
+  }
+  return false;
+}
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+}
+
+function scoreCandidate(
+  chunk: ContextChunk,
+  now: number,
+  duplicateHashes: Set<string> = new Set(),
+): PruneCandidate {
   const ageMinutes = Math.max(0, (now - chunk.createdAt) / 60_000);
   const reasons: string[] = [];
   let score = chunk.tokenEstimate;
 
+  if (chunk.source?.contentHash && duplicateHashes.has(chunk.source.contentHash)) {
+    score += 500;
+    reasons.push("duplicate content");
+  }
   if (chunk.restoreAvailable) {
     score += 300;
     reasons.push("restorable");
@@ -233,6 +341,27 @@ function scoreCandidate(chunk: ContextChunk, now: number): PruneCandidate {
     score,
     reasons,
   };
+}
+
+function protectedRecentChunkCount(
+  config: PruneChunksConfig,
+  pressurePercent?: number | null,
+): number {
+  const configured = Math.max(0, config.autoPrune.preserveRecentChunks);
+  if (pressurePercent == null) return configured;
+  if (pressurePercent >= config.autoPrune.startAtPercent + 10) return 0;
+  if (pressurePercent >= config.autoPrune.startAtPercent + 3) return Math.min(configured, 2);
+  return configured;
+}
+
+function duplicateContentHashes(chunks: ContextChunk[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const chunk of chunks) {
+    const hash = chunk.source?.contentHash;
+    if (!hash) continue;
+    counts.set(hash, (counts.get(hash) ?? 0) + 1);
+  }
+  return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([hash]) => hash));
 }
 
 function recentChunkIds(chunks: ContextChunk[], count: number): Set<string> {

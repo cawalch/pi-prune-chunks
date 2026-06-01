@@ -52,6 +52,11 @@ export interface ContextChunk {
   restoreAvailable: boolean;
 }
 
+export type PreserveContext = {
+  ids?: Set<string>;
+  paths?: Set<string>;
+};
+
 export interface ChunkAuditEvent {
   id: string;
   chunkId: string;

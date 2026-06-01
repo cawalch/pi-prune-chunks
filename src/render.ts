@@ -1,7 +1,13 @@
 import type { PruneCandidate } from "./pruner";
 import { contextPercent, pressureSummary } from "./pruner";
 import type { ChunkRegistry } from "./registry";
-import type { ChunkActionResult, ChunkListOutput, ContextUsage, PruneChunksConfig } from "./types";
+import type {
+  ChunkActionResult,
+  ChunkListOutput,
+  ContextUsage,
+  PreserveContext,
+  PruneChunksConfig,
+} from "./types";
 
 export function renderChunkList(output: ChunkListOutput): string {
   if (output.chunks.length === 0) {
@@ -54,8 +60,9 @@ export function renderPressure(
   registry: ChunkRegistry,
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
+  preserve?: PreserveContext,
 ): string {
-  const pressure = pressureSummary(registry, usage, config);
+  const pressure = pressureSummary(registry, usage, config, preserve);
   const pct = pressure.autoPrune.currentPercent;
   const providerTokens =
     usage?.tokens != null && usage.contextWindow != null
@@ -68,10 +75,32 @@ export function renderPressure(
     `Auto-prune: ${pressure.autoPrune.enabled ? "enabled" : "disabled"} start=${pressure.autoPrune.startAtPercent}% target=${pressure.autoPrune.targetPercent}%`,
   ];
 
+  if (pressure.autoPrune.nonChunkTokens != null) {
+    const bestPossible =
+      pressure.autoPrune.bestPossiblePercent == null
+        ? "unknown"
+        : `${Math.round(pressure.autoPrune.bestPossiblePercent)}%`;
+    lines.push(
+      `Non-chunk tokens: ~${pressure.autoPrune.nonChunkTokens}; best possible after chunk pruning: ${bestPossible}`,
+    );
+    if (pressure.autoPrune.targetReachableByChunks === false) {
+      lines.push("Auto-prune target cannot be reached by pruning tracked chunks alone.");
+    }
+  }
+
   if (pressure.recommendedCandidates.length > 0) {
     lines.push("", "Recommended prune candidates:");
     for (const candidate of pressure.recommendedCandidates.slice(0, 5)) {
       lines.push(renderCandidate(candidate));
+    }
+  }
+
+  if (pressure.blockedCandidates.length > 0) {
+    lines.push("", "Protected active chunks:");
+    for (const candidate of pressure.blockedCandidates.slice(0, 5)) {
+      lines.push(
+        `  ${candidate.id}: ${candidate.kind}/${candidate.risk} ~${candidate.tokenEstimate}t ${candidate.label}; ${candidate.reason}`,
+      );
     }
   }
 
