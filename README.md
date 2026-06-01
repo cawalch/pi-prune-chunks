@@ -123,7 +123,9 @@ Pi may provide extension config under `pruneChunks`:
       "includeSummary": true,
       "includeRestoreHint": true,
       "maxSummaryChars": 180,
-      "compactAtPercent": 90
+      "compactAtPercent": 90,
+      "coalesceAtPercent": 98,
+      "maxCoalescedEntries": 120
     },
     "restore": {
       "memory": true,
@@ -165,6 +167,10 @@ Raw tool output is not persisted to disk by default.
 - High-pressure tombstones: once provider context reaches the compact threshold,
   tombstones shrink to ID/kind/token markers to avoid tombstone overhead causing
   compaction or provider-window failures.
+- Extreme-pressure coalescing: once context is over the coalesce threshold, old
+  pruned tool-result tombstones are collapsed into a small manifest message with
+  restore IDs instead of preserving one provider message per pruned chunk. The
+  saved transcript remains unchanged.
 
 ## Development
 

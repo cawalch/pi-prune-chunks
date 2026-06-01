@@ -25,6 +25,15 @@ reaches the configured compact tombstone threshold, the context hook emits
 minimal tombstones so old pruned-tool markers do not themselves push Pi's
 auto-compaction or provider request over the context window.
 
+At more extreme pressure, the remaining risk is not tombstone text size but the
+number of provider messages. A session can look healthy by chunk accounting, for
+example `97 tracked, 95 pruned, ~759t active`, and still fail before the
+provider call with a request such as `71834 tokens exceeds the available context
+size 65536`. In that shape, many old pruned tool-result messages plus system
+prompt and conversation history dominate the request. The coalesce threshold
+collapses older pruned tombstones into one manifest that preserves chunk IDs and
+the `restore_chunks` hint while reducing provider-message overhead.
+
 Raw tool output is not persisted by default. This protects privacy but means
 same-session memory restore is the only exact restore path unless source
 rehydration metadata is available. Chunks without source path and line-range

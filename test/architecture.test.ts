@@ -34,6 +34,8 @@ function testConfig(overrides?: Partial<PruneChunksConfig>): PruneChunksConfig {
       includeRestoreHint: true,
       maxSummaryChars: 80,
       compactAtPercent: 90,
+      coalesceAtPercent: 110,
+      maxCoalescedEntries: 120,
     },
     ...overrides,
   });
@@ -756,6 +758,96 @@ describe("extension integration", () => {
     const tombstone = contextResult?.messages[0].content[0].text ?? "";
     assert.match(tombstone, new RegExp(`^\\[pruned:${id} search ~\\d+t; restore_chunks\\]$`));
   });
+
+  test("context hook coalesces extreme pruned tombstone overhead without mutating transcript messages", async () => {
+    const pi = createMockPi(
+      testConfig({
+        autoPrune: {
+          enabled: false,
+          startAtPercent: 70,
+          targetPercent: 55,
+          preserveRecentChunks: 0,
+          preserveRecentMinutes: 0,
+          minChunkTokens: 1,
+          maxChunksPerPass: 10,
+        },
+        tombstones: {
+          includeSummary: true,
+          includeRestoreHint: true,
+          maxSummaryChars: 80,
+          compactAtPercent: 90,
+          coalesceAtPercent: 110,
+          maxCoalescedEntries: 120,
+        },
+      }),
+    );
+    extension(pi as never);
+
+    const originalMessages: Array<{
+      role: string;
+      toolCallId: string;
+      content: ContentBlock[];
+    }> = [];
+    for (let i = 0; i < 100; i++) {
+      const toolCallId = `tool_${i}`;
+      const text = `src/file-${i}.ts:1: result ${i}\n`.repeat(80);
+      await pi.handlers.tool_result?.({
+        toolCallId,
+        toolName: "code_search",
+        content: textBlock(text),
+      });
+      originalMessages.push({
+        role: "toolResult",
+        toolCallId,
+        content: textBlock(text),
+      });
+    }
+
+    const list = await pi.tools.list_context_chunks.execute("list", {
+      sortBy: "age",
+      limit: 100,
+    });
+    const chunks = list.details.chunks as Array<{ id: string; source?: { toolCallId?: string } }>;
+    const idsToPrune = chunks.slice(0, 95).map((chunk) => chunk.id);
+    assert.equal(idsToPrune.length, 95);
+    await pi.tools.prune_chunks.execute("prune", {
+      ids: idsToPrune,
+      reason: "extreme tombstone-overhead regression",
+    });
+
+    const contextResult = await pi.handlers.context?.(
+      { messages: originalMessages },
+      {
+        getContextUsage: () => ({ tokens: 65_560, contextWindow: 49_152, percent: 133 }),
+      },
+    );
+    assert.ok(contextResult);
+
+    const providerMessages = contextResult.messages as typeof originalMessages;
+    assert.ok(
+      providerMessages.length < originalMessages.length / 4,
+      `expected coalescing to reduce ${originalMessages.length} messages, got ${providerMessages.length}`,
+    );
+    assert.equal(originalMessages.length, 100);
+    assert.equal(originalMessages[0].content[0].text, `src/file-0.ts:1: result 0\n`.repeat(80));
+
+    const providerText = providerMessages.map(messageText).join("\n");
+    assert.match(providerText, /coalesc|manifest|pruned/i);
+    assert.ok(providerText.includes("restore_chunks"));
+    assert.ok(providerText.includes(idsToPrune[0]));
+    assert.ok(providerText.includes(idsToPrune[94]));
+
+    for (const activeToolCallId of ["tool_95", "tool_99"]) {
+      assert.ok(
+        providerMessages.some(
+          (message) =>
+            message.toolCallId === activeToolCallId &&
+            message.content[0].text?.includes(`src/file-${activeToolCallId.slice(5)}.ts`),
+        ),
+        `${activeToolCallId} should remain as an active tool result`,
+      );
+    }
+  });
 });
 
 function createMockPi(config: PruneChunksConfig) {
@@ -793,4 +885,8 @@ function createMockPi(config: PruneChunksConfig) {
       entries.push({ type: "custom", customType, data });
     },
   };
+}
+
+function messageText(message: { content?: ContentBlock[] }): string {
+  return (message.content ?? []).map((block) => block.text ?? "").join("\n");
 }

@@ -84,7 +84,10 @@ export default function (pi: ExtensionAPI) {
       event.messages ?? [],
       (toolCallId) => registry.prunedForToolCall(toolCallId),
       config,
-      { compact: shouldCompactTombstones(usage, config) },
+      {
+        compact: shouldCompactTombstones(usage, config),
+        coalesce: shouldCoalesceTombstones(usage, config),
+      },
     );
 
     if (replacement.modified) {
@@ -470,8 +473,15 @@ function currentWorkingDirectory(ctx: unknown): string | undefined {
 }
 
 function shouldCompactTombstones(usage: ContextUsage | null, config: PruneChunksConfig): boolean {
+  if (shouldCoalesceTombstones(usage, config)) return true;
   const pct = contextPercent(usage);
   if (pct != null && pct >= config.tombstones.compactAtPercent) return true;
+  return !!usage?.contextWindow && usage.tokens != null && usage.tokens > usage.contextWindow;
+}
+
+function shouldCoalesceTombstones(usage: ContextUsage | null, config: PruneChunksConfig): boolean {
+  const pct = contextPercent(usage);
+  if (pct != null && pct >= config.tombstones.coalesceAtPercent) return true;
   return !!usage?.contextWindow && usage.tokens != null && usage.tokens > usage.contextWindow;
 }
 
