@@ -80,13 +80,23 @@ describe("collector", () => {
     );
     assert.equal(classifyRisk("test_output", "FAIL test one\nTraceback"), "high");
     assert.equal(classifyRisk("search", "src/a.ts:12: found symbol"), "low");
-    assert.equal(classifyRisk("file_read", "whole file", { path: "src/scanner.rs" }), "medium");
+    assert.equal(
+      classifyRisk("file_read", "large whole file\n".repeat(400), { path: "src/scanner.rs" }),
+      "medium",
+    );
     assert.equal(
       classifyRisk("file_read", "rules", { path: "RULES.md", startLine: 1, endLine: 80 }),
       "high",
     );
     assert.equal(
       classifyRisk("file_read", "bounded", { path: "src/scanner.rs", startLine: 20, endLine: 60 }),
+      "low",
+    );
+    assert.equal(classifyRisk("file_read", "short read\n".repeat(80), { path: "src/a.ts" }), "low");
+    assert.equal(
+      classifyRisk("shell", "short status\n".repeat(80), {
+        command: "git status --short",
+      }),
       "low",
     );
   });
@@ -108,6 +118,49 @@ describe("collector", () => {
     assert.equal(chunk.source?.startLine, 10);
     assert.ok(chunk.summary);
     assert.ok(chunk.tokenEstimate > 0);
+  });
+
+  test("infers source and low risk from read-only shell commands", () => {
+    const config = testConfig();
+    const sedChunk = collectToolResult({
+      toolCallId: "shell_sed",
+      toolName: "bash",
+      content: textBlock("func execute() {}\n".repeat(120)),
+      params: { command: "sed -n '120,180p' compiler/interpreter.go" },
+      config,
+    });
+    assert.ok(sedChunk);
+    assert.equal(sedChunk.kind, "file_read");
+    assert.equal(sedChunk.risk, "low");
+    assert.equal(sedChunk.source?.path, "compiler/interpreter.go");
+    assert.equal(sedChunk.source?.startLine, 120);
+    assert.equal(sedChunk.source?.endLine, 180);
+    assert.equal(sedChunk.label, "compiler/interpreter.go:120-180");
+
+    const numberedSedChunk = collectToolResult({
+      toolCallId: "shell_nl_sed",
+      toolName: "bash",
+      content: textBlock("   10\tfunc execute() {}\n".repeat(120)),
+      params: { command: "nl -ba compiler/interpreter.go | sed -n '10,30p'" },
+      config,
+    });
+    assert.ok(numberedSedChunk);
+    assert.equal(numberedSedChunk.kind, "file_read");
+    assert.equal(numberedSedChunk.source?.path, "compiler/interpreter.go");
+    assert.equal(numberedSedChunk.source?.startLine, 10);
+    assert.equal(numberedSedChunk.source?.endLine, 30);
+
+    const grepChunk = collectToolResult({
+      toolCallId: "shell_grep",
+      toolName: "bash",
+      content: textBlock("$ grep -n Variable ast/nodes.go\nast/nodes.go:10: Variable\n".repeat(80)),
+      config,
+    });
+    assert.ok(grepChunk);
+    assert.equal(grepChunk.kind, "search");
+    assert.equal(grepChunk.risk, "low");
+    assert.equal(grepChunk.source?.command, "grep -n Variable ast/nodes.go");
+    assert.equal(grepChunk.source?.path, "ast/nodes.go");
   });
 
   test("does not track prune-chunks tools and create self-referential bloat", () => {

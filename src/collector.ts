@@ -125,10 +125,12 @@ export function classifyKind(
     REAMER_TOOL_KINDS[normalized] ?? FLOW_TOOL_KINDS[normalized] ?? GENERIC_TOOL_KINDS[normalized];
   if (mapped && mapped !== "shell") return mapped;
 
-  const command = stringParam(params, ["command", "cmd"]);
+  const command = stringParam(params, ["command", "cmd"]) ?? commandFromToolOutput(toolName, text);
   const commandText = `${command ?? ""}\n${text}`;
   if (looksLikeDiff(commandText)) return "diff";
   if (looksLikeTestOutput(commandText)) return "test_output";
+  if (commandLooksLikeSearch(command)) return "search";
+  if (commandLooksLikeFileRead(command)) return "file_read";
   if (looksLikeSearchOutput(commandText)) return "search";
   if (looksLikeFileRead(toolName, params, text)) return "file_read";
   if (mapped) return mapped;
@@ -147,12 +149,17 @@ export function classifyRisk(kind: ChunkKind, text: string, source?: ChunkSource
     case "file_read":
       if (source?.path && isAnchorPath(source.path)) return "high";
       if (source?.startLine != null && source.endLine != null) return "low";
+      if (source?.path && estimateTokens(text) <= 700) return "low";
       return "medium";
     case "test_output":
       return looksSuccessfulTestOutput(text) ? "low" : "medium";
     case "diff":
     case "context_pack":
+      return "medium";
     case "shell":
+      if (source?.command && commandLooksReadOnly(source.command) && estimateTokens(text) <= 700) {
+        return "low";
+      }
       return "medium";
     case "other":
       return "medium";
@@ -191,7 +198,7 @@ export function inferSource(
     contentHash: hashText(text),
   };
 
-  const command = stringParam(params, ["command", "cmd"]);
+  const command = stringParam(params, ["command", "cmd"]) ?? commandFromToolOutput(toolName, text);
   if (command) source.command = command;
 
   const path = stringParam(params, ["path", "file", "filename", "target", "sourcePath"]);
@@ -205,15 +212,19 @@ export function inferSource(
   const symbol = stringParam(params, ["symbol", "name"]);
   if (symbol) source.symbol = symbol;
 
+  const commandSource = command ? inferSourceFromCommand(command) : {};
+  if (!source.path && commandSource.path) source.path = commandSource.path;
+  if (source.startLine == null && commandSource.startLine != null) {
+    source.startLine = commandSource.startLine;
+  }
+  if (source.endLine == null && commandSource.endLine != null) {
+    source.endLine = commandSource.endLine;
+  }
+
   const inferred = inferLocationFromText(text);
   if (!source.path && inferred.path) source.path = inferred.path;
   if (source.startLine == null && inferred.startLine != null) source.startLine = inferred.startLine;
   if (source.endLine == null && inferred.endLine != null) source.endLine = inferred.endLine;
-
-  if (!source.command && toolName.toLowerCase().includes("shell")) {
-    const first = firstMeaningfulLine(text);
-    if (first.startsWith("$ ")) source.command = first.slice(2);
-  }
 
   return source;
 }
@@ -273,6 +284,35 @@ function looksLikeFileRead(
   return /\bread\b/i.test(toolName) || /^[/.\w-]+\/[/.\w-]+:\d+/m.test(text);
 }
 
+function commandLooksLikeSearch(command: string | undefined): boolean {
+  return !!command && /^\s*(?:\/\S+\/)?(?:rg|grep|ffgrep)\b/.test(command);
+}
+
+function commandLooksLikeFileRead(command: string | undefined): boolean {
+  if (!command) return false;
+  return (
+    /^\s*(?:cat|bat|less|more|head|tail|sed|awk)\b/.test(command) ||
+    /^\s*nl\b[\s\S]*\|\s*sed\b/.test(command)
+  );
+}
+
+function commandLooksReadOnly(command: string): boolean {
+  return (
+    commandLooksLikeSearch(command) ||
+    commandLooksLikeFileRead(command) ||
+    /^\s*(?:ls|find|pwd|git\s+(?:status|diff|show|log|grep))\b/.test(command)
+  );
+}
+
+function commandFromToolOutput(toolName: string, text: string): string | undefined {
+  const normalized = toolName.toLowerCase();
+  if (!["shell", "bash", "command", "exec_command", "terminal"].includes(normalized)) {
+    return undefined;
+  }
+  const first = firstMeaningfulLine(text);
+  return first.startsWith("$ ") ? first.slice(2).trim() : undefined;
+}
+
 function hasCurrentFailureSignal(text: string): boolean {
   return /\b(FAIL|FAILED|Traceback|panic:|Exception|SyntaxError|TypeError|ReferenceError|compilation error|Command failed)\b/.test(
     text,
@@ -298,6 +338,47 @@ function inferLocationFromText(text: string): {
   if (diffMatch) return { path: diffMatch[2] };
 
   return {};
+}
+
+function inferSourceFromCommand(command: string): {
+  path?: string;
+  startLine?: number;
+  endLine?: number;
+} {
+  const numberedSed =
+    /\bnl\b(?:\s+-[^\s]+)*\s+(.+?)\s*\|\s*sed\s+-n\s+['"]?(\d+)(?:,(\d+))?p['"]?/.exec(command);
+  if (numberedSed) {
+    return {
+      path: cleanCommandPath(numberedSed[1]),
+      startLine: Number(numberedSed[2]),
+      endLine: numberedSed[3] ? Number(numberedSed[3]) : Number(numberedSed[2]),
+    };
+  }
+
+  const sed = /sed\s+-n\s+['"]?(\d+)(?:,(\d+))?p['"]?\s+(.+?)(?:\s*(?:\||$))/.exec(command);
+  if (sed) {
+    return {
+      path: cleanCommandPath(sed[3]),
+      startLine: Number(sed[1]),
+      endLine: sed[2] ? Number(sed[2]) : Number(sed[1]),
+    };
+  }
+
+  const grep =
+    /\b(?:rg|grep|ffgrep)\b(?:\s+-[^\s]+)*\s+(?:"[^"]+"|'[^']+'|\S+)\s+(.+?)(?:\s*(?:\||$))/.exec(
+      command,
+    );
+  if (grep) return { path: cleanCommandPath(grep[1]) };
+
+  const directRead =
+    /^\s*(?:cat|bat|less|more|head|tail)\b(?:\s+-[^\s]+)*\s+(.+?)(?:\s*(?:\||$))/.exec(command);
+  if (directRead) return { path: cleanCommandPath(directRead[1]) };
+
+  return {};
+}
+
+function cleanCommandPath(path: string): string {
+  return path.trim().replace(/^['"]|['"]$/g, "");
 }
 
 function stringParam(
