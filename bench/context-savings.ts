@@ -1,7 +1,18 @@
 #!/usr/bin/env node
 // bench/context-savings.ts — Simulate an agent session and measure pruning impact.
 
-import { ChunkTracker, estimateTokens, tombstoneFor } from "../src/tracker";
+import {
+  collectToolResult,
+  estimateTokens,
+  mergeConfig,
+  ChunkRegistry,
+  tombstoneFor,
+} from "../src/tracker";
+
+const CONFIG = mergeConfig({
+  track: { minChunkTokens: 1 },
+  tombstones: { includeSummary: true, includeRestoreHint: true, maxSummaryChars: 120 },
+});
 
 const SIMULATED_RESULTS: Array<{ tool: string; text: string }> = [];
 
@@ -193,21 +204,19 @@ function simulate() {
 
   // 1. No pruning baseline
   idCounter = 0;
-  const trackerNoPrune = new ChunkTracker();
   const noPruneTokens: number[] = [];
   let noPruneCumulative = 0;
 
   for (let i = 0; i < 50; i++) {
     const result = SIMULATED_RESULTS[i % SIMULATED_RESULTS.length];
-    const content = [{ type: "text" as const, text: result.text }];
-    trackerNoPrune.catalogue(nextId(), result.tool, content);
+    nextId();
     noPruneCumulative += estimateTokens(result.text);
     noPruneTokens.push(noPruneCumulative);
   }
 
-  // 2. With pruning — prune chunks older than 10 tool calls
+  // 2. With pruning - prune chunks older than 10 tool calls
   idCounter = 0;
-  const trackerPrune = new ChunkTracker();
+  const registry = new ChunkRegistry();
   const pruneTokens: number[] = [];
   const catalogueHistory: string[] = [];
   const PRUNE_AGE = 10;
@@ -216,26 +225,32 @@ function simulate() {
     const result = SIMULATED_RESULTS[i % SIMULATED_RESULTS.length];
     const content = [{ type: "text" as const, text: result.text }];
     const id = nextId();
-    trackerPrune.catalogue(id, result.tool, content);
-    catalogueHistory.push(id);
+    const collected = collectToolResult({
+      toolCallId: id,
+      toolName: result.tool,
+      content,
+      config: CONFIG,
+    });
+    if (!collected) continue;
+    const chunk = registry.addCollected(collected);
+    catalogueHistory.push(chunk.id);
 
     if (catalogueHistory.length > PRUNE_AGE) {
       const toPrune = catalogueHistory.slice(0, catalogueHistory.length - PRUNE_AGE);
-      const alreadyPruned = trackerPrune.prunedIds();
-      const fresh = toPrune.filter((x) => !alreadyPruned.has(x));
+      const fresh = toPrune.filter((chunkId) => !registry.get(chunkId)?.pruned);
       if (fresh.length > 0) {
-        trackerPrune.prune(fresh, `older than ${PRUNE_AGE} steps`);
+        registry.prune(fresh, `older than ${PRUNE_AGE} steps`);
       }
     }
 
     let contextTokens = 0;
     for (const chunkId of catalogueHistory) {
-      const chunk = trackerPrune.get(chunkId);
+      const chunk = registry.get(chunkId);
       if (!chunk) continue;
       if (chunk.pruned) {
-        contextTokens += estimateTokens(tombstoneFor(chunk)[0].text);
+        contextTokens += estimateTokens(tombstoneFor(chunk, CONFIG)[0].text ?? "");
       } else {
-        contextTokens += chunk.estTokens;
+        contextTokens += chunk.tokenEstimate;
       }
     }
     pruneTokens.push(contextTokens);
@@ -263,10 +278,8 @@ function simulate() {
   console.log(`  No-prune total:  ${finalNoPrune} tokens`);
   console.log(`  Pruned total:    ${finalPruned} tokens`);
   console.log(`  Saved:           ${finalSaved} tokens (${finalPct}%)`);
-  console.log(`  Pruned chunks:   ${trackerPrune.prunedIds().size}`);
-  console.log(
-    `  Active chunks:   ${trackerPrune.list().totalChunks - trackerPrune.prunedIds().size}`,
-  );
+  console.log(`  Pruned chunks:   ${registry.summary().prunedChunks}`);
+  console.log(`  Active chunks:   ${registry.summary().totalChunks - registry.summary().prunedChunks}`);
 
   const savings = noPruneTokens.map((np, i) => ((np - pruneTokens[i]) / np) * 100);
   console.log("\nSavings curve (every 10 steps):");

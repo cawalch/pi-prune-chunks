@@ -1,11 +1,12 @@
 {
   "name": "pi-prune-chunks",
   "version": "0.1.0",
-  "description": "Context management companion for pi — tracks tool-result chunks and lets the agent prune/restore them to manage context window",
+  "description": "Context management companion for pi - tracks tool-result chunks and lets the agent prune/restore them to manage context window",
   "main": "index.ts",
   "files": [
     "index.ts",
     "src/**/*.ts",
+    "docs/**/*.md",
     "README.md",
     "LICENSE",
     "pi.d.ts"
