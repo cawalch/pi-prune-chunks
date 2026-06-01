@@ -94,6 +94,8 @@ export type PruneChunksConfig = {
     preserveRecentMinutes: number;
     minChunkTokens: number;
     maxChunksPerPass: number;
+    pruneSupersededOnIngest: boolean;
+    pruneZeroMatchSearchesOnIngest: boolean;
   };
   tombstones: {
     includeSummary: boolean;
@@ -154,6 +156,8 @@ export type ChunkListOutput = {
     tokenEstimate: number;
     pruned: boolean;
     pinned: boolean;
+    pruneReason?: string;
+    pinReason?: string;
     restoreMode: RestoreMode;
     restoreAvailable: boolean;
     restoreUnavailableReason?: string;

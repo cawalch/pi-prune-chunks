@@ -117,7 +117,9 @@ Pi may provide extension config under `pruneChunks`:
       "preserveRecentChunks": 5,
       "preserveRecentMinutes": 3,
       "minChunkTokens": 300,
-      "maxChunksPerPass": 10
+      "maxChunksPerPass": 10,
+      "pruneSupersededOnIngest": true,
+      "pruneZeroMatchSearchesOnIngest": true
     },
     "tombstones": {
       "includeSummary": true,
@@ -151,6 +153,10 @@ Raw tool output is not persisted to disk by default.
 - Conservative auto-prune: pinned, high-risk, the most recent chunks, recently
   restored chunks, and latest-assistant-referenced chunks are preserved. Created
   age and token floors relax once usage is materially above the start threshold.
+- Ingest pruning: safely superseded chunks are pruned as soon as a newer result
+  arrives. This covers overlapping file reads, repeated shell/search/test
+  commands, exact duplicate outputs, superseded diffs of the same file, and
+  zero-match search results.
 - File-read pruning is cautious: instruction files, manifests, and common
   entrypoints are high risk, while unbounded whole-file reads wait for a higher
   pressure band than searches or context packs.

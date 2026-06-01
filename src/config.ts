@@ -14,6 +14,8 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     preserveRecentMinutes: 3,
     minChunkTokens: 300,
     maxChunksPerPass: 10,
+    pruneSupersededOnIngest: true,
+    pruneZeroMatchSearchesOnIngest: true,
   },
   tombstones: {
     includeSummary: true,
@@ -55,6 +57,12 @@ export function mergeConfig(input?: Partial<PruneChunksConfig> | null): PruneChu
       minChunkTokens: input.autoPrune?.minChunkTokens ?? DEFAULT_CONFIG.autoPrune.minChunkTokens,
       maxChunksPerPass:
         input.autoPrune?.maxChunksPerPass ?? DEFAULT_CONFIG.autoPrune.maxChunksPerPass,
+      pruneSupersededOnIngest:
+        input.autoPrune?.pruneSupersededOnIngest ??
+        DEFAULT_CONFIG.autoPrune.pruneSupersededOnIngest,
+      pruneZeroMatchSearchesOnIngest:
+        input.autoPrune?.pruneZeroMatchSearchesOnIngest ??
+        DEFAULT_CONFIG.autoPrune.pruneZeroMatchSearchesOnIngest,
     },
     tombstones: {
       includeSummary: input.tombstones?.includeSummary ?? DEFAULT_CONFIG.tombstones.includeSummary,

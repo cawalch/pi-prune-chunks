@@ -7,7 +7,12 @@ import { Type } from "typebox";
 import { collectToolResult } from "./src/collector";
 import { mergeConfig } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
-import { autoPrune, contextPercent, suggestPruneCandidates } from "./src/pruner";
+import {
+  autoPrune,
+  contextPercent,
+  pruneSupersededAfterCollect,
+  suggestPruneCandidates,
+} from "./src/pruner";
 import { ChunkRegistry } from "./src/registry";
 import {
   contextFooter,
@@ -54,7 +59,13 @@ export default function (pi: ExtensionAPI) {
       params: extractParams(event),
       config,
     });
-    if (collected) registry.addCollected(collected);
+    if (collected) {
+      const chunk = registry.addCollected(collected);
+      const stalePrune = pruneSupersededAfterCollect(registry, chunk, config);
+      if (stalePrune.pruned.some((result) => result.status === "pruned")) {
+        persistState();
+      }
+    }
   });
 
   pi.on("context", async (event, ctx) => {
