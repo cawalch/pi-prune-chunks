@@ -56,7 +56,6 @@ export class ChunkRegistry {
     if (existingId) {
       const existing = this.chunks.get(existingId);
       if (existing) {
-        existing.lastSeenAt = now;
         existing.updatedAt = now;
         existing.restoreMode = "memory";
         existing.restoreAvailable = true;
@@ -79,7 +78,6 @@ export class ChunkRegistry {
       tokenEstimate: collected.tokenEstimate,
       createdAt: now,
       updatedAt: now,
-      lastSeenAt: now,
       pruned: false,
       pinned: false,
       summary: collected.summary,

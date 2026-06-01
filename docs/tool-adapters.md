@@ -5,7 +5,7 @@ The collector recognizes generic Pi tools plus Reamer and FlowTrace families.
 Generic families:
 
 - file reads: `read`, `file_read`, `view_file`, `open_file`, `cat`
-- searches: `search`, `grep`, `rg`, `ripgrep`
+- searches: `search`, `ffgrep`, `grep`, `rg`, `ripgrep`
 - shell: `shell`, `bash`, `command`, `exec_command`, `terminal`
 - tests: `test`, `npm_test`, `pytest`, `go_test`
 - diffs: `diff`, `git_diff`

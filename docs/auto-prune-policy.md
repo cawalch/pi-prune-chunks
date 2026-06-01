@@ -11,8 +11,9 @@ Auto-prune is enabled by default with conservative thresholds:
 - prune safely superseded chunks at ingestion
 - prune zero-match search results at ingestion
 
-Candidates are rejected when they are already pruned, pinned, high risk, too
-small, recent, recently restored, or referenced by the latest assistant message.
+Candidates are rejected when they are already pruned, pinned, high risk, not yet
+seen in model context, too small, recent, recently restored, or referenced by
+the latest assistant message.
 Once pressure is at least 5 percentage points above the start threshold, the
 created-age window and token floor relax so fast sessions can still shed safe
 old-enough-by-position chunks. Pinned, high-risk, most-recent, recently restored,
