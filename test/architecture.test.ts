@@ -65,7 +65,9 @@ function addChunk(
     config,
   });
   assert.ok(collected);
-  return registry.addCollected(collected, createdAt);
+  const chunk = registry.addCollected(collected, createdAt);
+  registry.markSeenByToolCallId(id, createdAt + 1);
+  return chunk;
 }
 
 describe("collector", () => {
@@ -99,6 +101,7 @@ describe("collector", () => {
       }),
       "low",
     );
+    assert.equal(classifyKind("ffgrep", "parser/expression_parser.go\n  309: hit", {}), "search");
   });
 
   test("collects metadata with stable source and bounded summary", () => {
@@ -327,6 +330,32 @@ describe("pruner and restorer", () => {
     assert.equal(registry.get(safe.id)?.pruned, true);
     assert.equal(registry.get(pinned.id)?.pruned, false);
     assert.equal(registry.get(failure.id)?.pruned, false);
+  });
+
+  test("auto-prune waits until a chunk has been seen in model context", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const collected = collectToolResult({
+      toolCallId: "fresh_search",
+      toolName: "ffgrep",
+      content: textBlock("parser/expression_parser.go\n  309: rangeExpr\n".repeat(160)),
+      config,
+    });
+    assert.ok(collected);
+    const chunk = registry.addCollected(collected, Date.now() - 60_000);
+
+    const usage: ContextUsage = { tokens: 9_000, contextWindow: 10_000, percent: 90 };
+    const firstPass = autoPrune(registry, usage, config);
+
+    assert.equal(firstPass.triggered, true);
+    assert.equal(firstPass.pruned.length, 0);
+    assert.equal(registry.get(chunk.id)?.pruned, false);
+
+    registry.markSeenByToolCallId("fresh_search");
+    const secondPass = autoPrune(registry, usage, config);
+
+    assert.equal(secondPass.pruned.length, 1);
+    assert.equal(registry.get(chunk.id)?.pruned, true);
   });
 
   test("auto-prune relaxes age, token floor, and recent guards under pressure", () => {
@@ -844,6 +873,16 @@ describe("extension integration", () => {
         content: textBlock("src/b.ts:1: result\n".repeat(250)),
       },
     ];
+    const firstContextResult = await pi.handlers.context?.(
+      { messages },
+      {
+        hasUI: true,
+        ui: pi.ui,
+        getContextUsage: () => ({ tokens: 9_000, contextWindow: 10_000, percent: 90 }),
+      },
+    );
+    assert.equal(firstContextResult, undefined);
+
     const contextResult = await pi.handlers.context?.(
       { messages },
       {

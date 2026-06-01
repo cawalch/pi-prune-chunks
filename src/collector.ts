@@ -52,6 +52,7 @@ const GENERIC_TOOL_KINDS: Record<string, ChunkKind> = {
   open_file: "file_read",
   cat: "file_read",
   search: "search",
+  ffgrep: "search",
   grep: "search",
   rg: "search",
   ripgrep: "search",

@@ -298,6 +298,7 @@ function autoPruneBlockedReason(
   if (chunk.pruned) return "already pruned";
   if (chunk.pinned) return "pinned";
   if (chunk.risk === "high") return "high risk";
+  if (chunk.lastSeenAt == null) return "not yet seen in model context";
   if (isPathPreserved(chunk, preserve?.paths)) return "referenced by active working context";
   if (
     chunk.kind === "file_read" &&
