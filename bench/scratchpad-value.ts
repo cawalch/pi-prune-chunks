@@ -6,7 +6,7 @@
 //   2. How scratchpad note size affects the savings curve
 //   3. Whether the added complexity is justified
 
-import { ChunkTracker, estimateTokens, tombstoneFor } from "../src/tracker";
+import { estimateTokens } from "../src/tracker";
 
 // ---------------------------------------------------------------------------
 // Simulated tool results (realistic sizes)

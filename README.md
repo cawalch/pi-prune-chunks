@@ -1,100 +1,167 @@
 # pi-prune-chunks
 
-Context management companion for [pi](https://github.com/cawalch/pi-coding-agent) — tracks tool-result chunks from Reamer and FlowTrace and lets the agent prune/restore them to manage the context window.
+`pi-prune-chunks` is a Pi coding-agent extension for restorable context garbage
+collection. It tracks bulky tool results, replaces low-value pruned results with
+compact tombstones before provider calls, and keeps Pi's saved transcript intact.
 
-## Why
-
-Long agentic coding sessions accumulate tool-result context: `code_context` packs, `flow_trace` trees, search results. As context fills up, the model either triggers compaction (losing earlier work) or produces degraded reasoning.
-
-Prune-chunks gives the agent a controlled lever: list what's consuming context, prune chunks that are no longer needed, and restore them if priorities change.
-
-## How it works
-
-1. **`tool_result` hook**: Automatically catalogues chunks from 13 Reamer/FlowTrace tools
-2. **`context` hook**: Replaces pruned chunk content with compact tombstones before each LLM call — the saved transcript is untouched
-3. **3 custom tools**: The agent can list, prune, and restore chunks with stable ids
-4. **`/prune-status` command**: Show tracking summary in the TUI
-
-Tombstone format: `[pruned:<id> <tool> "<label>" ~<tokens>t — use restore_chunks to recover]`
+Pi's built-in compaction is still useful, but it happens late. This extension
+reduces context pressure before compaction by pruning old, restorable tool output
+such as file reads, searches, shell logs, test output, diffs, Reamer context
+packs, and FlowTrace results.
 
 ## Installation
 
 ```bash
-# As a pi extension
 pi --extension /path/to/pi-prune-chunks
+```
 
-# Or in settings.json
+Or in Pi settings:
+
+```json
 {
-  "extensions": ["path/to/pi-prune-chunks"]
+  "extensions": ["/path/to/pi-prune-chunks"]
 }
 ```
+
+## How It Works
+
+1. The `tool_result` hook collects large text tool results into chunk metadata.
+2. The registry assigns stable IDs such as `pc_0001_a1b2c3`, stores metadata,
+   and keeps same-session content in memory for restore.
+3. The `context` hook optionally auto-prunes safe old chunks when context usage
+   exceeds the configured threshold.
+4. Pruned chunks are replaced only in the provider-bound message copy with a
+   tombstone like:
+
+```text
+[pruned:pc_0001_a1b2c3 search/code_search "src/a.ts:10" ~1200t summary="..." restore="restore_chunks({ids:['pc_0001_a1b2c3']})"]
+```
+
+Saved transcript entries are not rewritten or deleted.
 
 ## Tools
 
 ### `list_context_chunks`
 
-List tracked tool-result chunks with token estimates.
+Lists tracked chunks with kind, risk, token estimate, prune/pin state, restore
+availability, summary, and source metadata.
 
-```
-list_context_chunks({
-  toolName?: string,    // filter by tool name
-  pruned?: boolean,     // filter by pruned status
-  limit?: number        // max chunks to list (default 20)
-})
+```ts
+{
+  toolName?: string;
+  kind?: "file_read" | "search" | "flow_trace" | "context_pack" | "shell" | "test_output" | "diff" | "outline" | "symbol" | "other";
+  pruned?: boolean;
+  pinned?: boolean;
+  minTokens?: number;
+  limit?: number;
+  sortBy?: "tokens" | "age" | "recent" | "risk";
+}
 ```
 
 ### `prune_chunks`
 
-Replace chunk content with tombstones to free context tokens.
+Prunes explicit chunk IDs. Legacy age/size convenience pruning is intentionally
+not part of v1.
 
-```
-prune_chunks({
-  ids: string[],        // chunk ids to prune (from list_context_chunks)
-  reason?: string       // optional reason for audit trail
-})
+```ts
+{ ids: string[]; reason?: string }
 ```
 
 ### `restore_chunks`
 
-Recover pruned chunk content (same session only — content is not persisted across reloads).
+Restores pruned chunks from same-session memory, then source rehydration for
+file-backed chunks with path and line range metadata.
 
+```ts
+{ ids: string[] }
 ```
-restore_chunks({
-  ids: string[]         // chunk ids to restore
-})
+
+### `pin_chunks` / `unpin_chunks`
+
+Pins prevent auto-prune from pruning important chunks. Manual prune by explicit
+ID remains available.
+
+```ts
+pin_chunks({ ids: string[], reason?: string })
+unpin_chunks({ ids: string[] })
 ```
 
-## Tracked tools
+### `context_pressure`
 
-The extension catalogues results from these tools:
+Reports active/pruned chunk tokens, largest active chunks, auto-prune settings,
+and recommended prune candidates.
 
-- `code_context`, `code_search`, `code_search_symbols`
-- `code_read_range`, `code_read_symbol`, `code_outline`, `code_related`
-- `code_pattern_search`, `code_semantic_search`, `code_flow_trace`
-- `flow_trace`, `flow_path`, `flow_impact`
+## Commands
 
-## Persistence
+- `/prune-status` shows pressure and policy state.
+- `/prune-largest --limit 20 --kind search` lists largest active chunks.
+- `/prune-suggest --limit 10` lists safe candidates without pruning.
+- `/prune-now --target 45000 --dry-run` previews safe immediate pruning.
+- `/prune-now` prunes up to the configured max safe candidates.
 
-- Pruned-set is persisted via `pi.appendEntry()` for reload/resume
-- Original content is kept in memory for same-session restore
-- Across reloads, pruned status is retained but content cannot be restored (tombstones remain)
+## Configuration
 
-## Design decisions
+Pi may provide extension config under `pruneChunks`:
 
-- **Non-destructive**: Pruning happens in the `context` hook (pre-provider), not by modifying session entries. This preserves transcript integrity and provider prefix-cache hits.
-- **Agent-driven**: The model decides what to prune. No automatic heuristics that might remove the wrong context.
-- **Reversible within session**: Restore is always available for the current session.
-- **Tombstones, not deletion**: Pruned content is replaced with a compact reference, not removed. The agent always knows what was pruned and can decide to restore it.
+```json
+{
+  "pruneChunks": {
+    "enabled": true,
+    "trackTools": ["*"],
+    "track": { "minChunkTokens": 200 },
+    "autoPrune": {
+      "enabled": true,
+      "startAtPercent": 70,
+      "targetPercent": 55,
+      "preserveRecentChunks": 5,
+      "preserveRecentMinutes": 3,
+      "minChunkTokens": 300,
+      "maxChunksPerPass": 10
+    },
+    "tombstones": {
+      "includeSummary": true,
+      "includeRestoreHint": true,
+      "maxSummaryChars": 180
+    },
+    "restore": {
+      "memory": true,
+      "diskCache": false,
+      "sourceRehydrate": true
+    },
+    "debug": false
+  }
+}
+```
+
+Raw tool output is not persisted to disk by default.
+
+## Safety Model
+
+- Non-destructive: provider context is rewritten, saved transcript history is not.
+- Restorable: same-session memory restores exact content; source rehydrate can
+  recover file ranges when metadata is available.
+- Conservative auto-prune: pinned, high-risk, the most recent chunks, recently
+  restored chunks, and latest-assistant-referenced chunks are preserved. Created
+  age and token floors relax once usage is materially above the start threshold.
+- File-read pruning is cautious: instruction files, manifests, and common
+  entrypoints are high risk, while unbounded whole-file reads wait for a higher
+  pressure band than searches or context packs.
+- Transparent: every pruned chunk leaves a tombstone with ID, kind, tool, label,
+  token estimate, optional summary, and restore hint.
 
 ## Development
 
+Use the Homebrew Node path in shells where `npm` is not on `PATH`:
+
 ```bash
-npm install
-npm run check          # lint + typecheck + test + coverage
-npm test               # run tests
-npm run pack:dry       # verify package contents
+PATH=/opt/homebrew/bin:$PATH /opt/homebrew/bin/npm run check
+PATH=/opt/homebrew/bin:$PATH /opt/homebrew/bin/npm run pack:dry
 ```
 
-## License
+## More Docs
 
-MIT
+- [Architecture](docs/architecture.md)
+- [Auto-prune policy](docs/auto-prune-policy.md)
+- [Tool adapters](docs/tool-adapters.md)
+- [Testing](docs/testing.md)
+- [Failure modes](docs/failure-modes.md)
