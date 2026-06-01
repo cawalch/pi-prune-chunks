@@ -34,6 +34,13 @@ prompt and conversation history dominate the request. The coalesce threshold
 collapses older pruned tombstones into one manifest that preserves chunk IDs and
 the `restore_chunks` hint while reducing provider-message overhead.
 
+Failed tool-call validation can create a separate overflow path. A malformed
+call can fail before execution and echo a large `Received arguments` block, such
+as an `edit` request with a full `oldText` body but no valid `newText`. The
+context guard compacts oversized validation errors in the provider copy,
+preserving the tool name, schema error, request-overflow line, and content hash
+while omitting the raw echoed arguments. The saved transcript remains unchanged.
+
 Raw tool output is not persisted by default. This protects privacy but means
 same-session memory restore is the only exact restore path unless source
 rehydration metadata is available. Chunks without source path and line-range

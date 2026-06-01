@@ -103,6 +103,10 @@ export type PruneChunksConfig = {
     coalesceAtPercent: number;
     maxCoalescedEntries: number;
   };
+  contextGuards: {
+    compactFailedToolValidation: boolean;
+    maxFailedToolValidationChars: number;
+  };
   restore: {
     memory: boolean;
     diskCache: boolean;

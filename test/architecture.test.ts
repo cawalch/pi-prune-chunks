@@ -848,6 +848,54 @@ describe("extension integration", () => {
       );
     }
   });
+
+  test("context hook compacts oversized failed tool validation payloads", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    const hugeOldText = "func noisy() {\n\treturn\n}\n".repeat(900);
+    const validationText =
+      'Validation failed for tool "edit":\n' +
+      "  - edits.0.newText: must have required properties newText\n\n" +
+      "Received arguments:\n" +
+      JSON.stringify({
+        path: "/Users/cawalch/go-yara/compiler/interpreter_strings.go",
+        edits: [{ oldText: hugeOldText }],
+      }) +
+      "\n\nError: 400 request (66019 tokens) exceeds the available context size (65536 tokens)";
+    const originalMessages = [
+      {
+        role: "toolResult",
+        toolCallId: "bad_edit",
+        content: textBlock(validationText),
+      },
+      {
+        role: "user",
+        toolCallId: "none",
+        content: textBlock("continue fixing the edit"),
+      },
+    ];
+
+    const contextResult = await pi.handlers.context?.(
+      { messages: originalMessages },
+      {
+        getContextUsage: () => ({ tokens: 66_019, contextWindow: 65_536, percent: 101 }),
+      },
+    );
+    assert.ok(contextResult);
+
+    const providerMessages = contextResult.messages as typeof originalMessages;
+    const compacted = providerMessages[0].content[0].text ?? "";
+    assert.match(compacted, /^\[compacted-tool-validation-error:/);
+    assert.ok(compacted.includes('tool="edit"'));
+    assert.ok(compacted.includes("edits.0.newText"));
+    assert.ok(compacted.includes("Received arguments omitted"));
+    assert.ok(compacted.includes("66019 tokens"));
+    assert.ok(!compacted.includes("func noisy"));
+    assert.ok(compacted.length < 500);
+    assert.equal(originalMessages[0].content[0].text, validationText);
+    assert.equal(providerMessages[1].content[0].text, "continue fixing the edit");
+  });
 });
 
 function createMockPi(config: PruneChunksConfig) {
