@@ -33,6 +33,11 @@ export type AutoPruneResult = {
   reason?: string;
 };
 
+export type SupersededPruneResult = {
+  pruned: ChunkActionResult[];
+  savedTokens: number;
+};
+
 export function contextPercent(usage?: ContextUsage | null): number | null {
   if (!usage) return null;
   if (usage.percent != null) return usage.percent;
@@ -129,6 +134,39 @@ export function autoPrune(
     pruned,
     savedTokens: pruned.reduce((sum, result) => sum + result.tokens, 0),
     reason,
+  };
+}
+
+export function pruneSupersededAfterCollect(
+  registry: ChunkRegistry,
+  chunk: ContextChunk,
+  config: PruneChunksConfig,
+): SupersededPruneResult {
+  if (!config.autoPrune.enabled || !config.autoPrune.pruneSupersededOnIngest) {
+    return { pruned: [], savedTokens: 0 };
+  }
+
+  const reasons = new Map<string, string>();
+  if (config.autoPrune.pruneZeroMatchSearchesOnIngest && isZeroMatchSearch(chunk)) {
+    reasons.set(chunk.id, "auto-prune: zero-match search result");
+  }
+
+  for (const previous of registry.active()) {
+    if (previous.id === chunk.id) continue;
+    if (previous.pinned || previous.risk === "high" || !previous.restoreAvailable) continue;
+
+    const reason = supersededReason(previous, chunk);
+    if (reason) reasons.set(previous.id, `auto-prune: ${reason}`);
+  }
+
+  const pruned: ChunkActionResult[] = [];
+  for (const [id, reason] of reasons) {
+    pruned.push(...registry.prune([id], reason, "auto_pruned"));
+  }
+
+  return {
+    pruned,
+    savedTokens: pruned.reduce((sum, result) => sum + result.tokens, 0),
   };
 }
 
@@ -308,6 +346,10 @@ function scoreCandidate(
     score += 500;
     reasons.push("duplicate content");
   }
+  if (isZeroMatchSearch(chunk)) {
+    score += 500;
+    reasons.push("zero-match search");
+  }
   if (chunk.restoreAvailable) {
     score += 300;
     reasons.push("restorable");
@@ -341,6 +383,76 @@ function scoreCandidate(
     score,
     reasons,
   };
+}
+
+function supersededReason(previous: ContextChunk, current: ContextChunk): string | null {
+  if (sameContent(previous, current)) return "duplicate output superseded by newer result";
+  if (sameCommand(previous, current)) return "duplicate command superseded by newer result";
+  if (overlappingFileRead(previous, current)) {
+    return "overlapping file read superseded by newer result";
+  }
+  if (supersededDiff(previous, current)) return "diff superseded by newer diff";
+  return null;
+}
+
+function sameContent(previous: ContextChunk, current: ContextChunk): boolean {
+  return (
+    !!previous.source?.contentHash &&
+    previous.source.contentHash === current.source?.contentHash &&
+    previous.kind === current.kind
+  );
+}
+
+function sameCommand(previous: ContextChunk, current: ContextChunk): boolean {
+  const previousCommand = normalizeCommand(previous.source?.command);
+  const currentCommand = normalizeCommand(current.source?.command);
+  return (
+    !!previousCommand &&
+    previousCommand === currentCommand &&
+    previous.kind === current.kind &&
+    ["shell", "search", "test_output"].includes(current.kind)
+  );
+}
+
+function overlappingFileRead(previous: ContextChunk, current: ContextChunk): boolean {
+  if (previous.kind !== "file_read" || current.kind !== "file_read") return false;
+  if (!samePath(previous, current)) return false;
+  if (previous.risk === "high" || current.risk === "high") return false;
+
+  const previousRange = sourceRange(previous);
+  const currentRange = sourceRange(current);
+  if (!previousRange || !currentRange) return sameContent(previous, current);
+
+  return previousRange.start <= currentRange.end && currentRange.start <= previousRange.end;
+}
+
+function supersededDiff(previous: ContextChunk, current: ContextChunk): boolean {
+  return previous.kind === "diff" && current.kind === "diff" && samePath(previous, current);
+}
+
+function samePath(previous: ContextChunk, current: ContextChunk): boolean {
+  const previousPath = previous.source?.path ? normalizePath(previous.source.path) : undefined;
+  const currentPath = current.source?.path ? normalizePath(current.source.path) : undefined;
+  return !!previousPath && previousPath === currentPath;
+}
+
+function sourceRange(chunk: ContextChunk): { start: number; end: number } | null {
+  if (chunk.source?.startLine == null || chunk.source.endLine == null) return null;
+  return {
+    start: Math.min(chunk.source.startLine, chunk.source.endLine),
+    end: Math.max(chunk.source.startLine, chunk.source.endLine),
+  };
+}
+
+function isZeroMatchSearch(chunk: ContextChunk): boolean {
+  if (chunk.kind !== "search") return false;
+  const text = `${chunk.label}\n${chunk.summary ?? ""}`;
+  return /\b0\s+(exact\s+)?(matches|results|hits)\b/i.test(text);
+}
+
+function normalizeCommand(command: string | undefined): string | undefined {
+  const normalized = command?.replace(/\s+/g, " ").trim();
+  return normalized || undefined;
 }
 
 function protectedRecentChunkCount(

@@ -8,6 +8,8 @@ Auto-prune is enabled by default with conservative thresholds:
 - preserve chunks created or restored in the last 3 minutes
 - only consider chunks with at least 300 estimated tokens
 - prune at most 10 chunks per pass
+- prune safely superseded chunks at ingestion
+- prune zero-match search results at ingestion
 
 Candidates are rejected when they are already pruned, pinned, high risk, too
 small, recent, recently restored, or referenced by the latest assistant message.
@@ -20,6 +22,15 @@ Pressure reports separate tracked chunk tokens from non-chunk provider tokens.
 If the system prompt and conversation history already exceed the configured
 target, the report says the target cannot be reached by pruning tracked chunks
 alone.
+
+Ingest pruning runs before the pressure threshold. When
+`autoPrune.pruneSupersededOnIngest` is enabled, a newer result prunes older
+restorable active chunks that it safely supersedes: exact duplicate output,
+repeated shell/search/test commands, overlapping reads of the same file, and
+older diffs for the same file. When
+`autoPrune.pruneZeroMatchSearchesOnIngest` is enabled, zero-match search results
+are pruned immediately. Pinned, high-risk, and unrestorable chunks are not
+pruned by this path.
 
 Tombstones are normally informative, with label, source, bounded summary, and
 restore hint. At high provider-context pressure, the context hook switches to

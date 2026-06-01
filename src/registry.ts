@@ -163,6 +163,8 @@ export class ChunkRegistry {
         tokenEstimate: chunk.tokenEstimate,
         pruned: chunk.pruned,
         pinned: chunk.pinned,
+        pruneReason: chunk.pruneReason,
+        pinReason: chunk.pinReason,
         restoreMode: chunk.restoreMode,
         restoreAvailable: chunk.restoreAvailable,
         restoreUnavailableReason: chunk.restoreUnavailableReason,

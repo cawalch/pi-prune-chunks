@@ -6,7 +6,12 @@ import test, { describe } from "node:test";
 import extension, { preserveContext } from "../index";
 import { classifyKind, classifyRisk, collectToolResult } from "../src/collector";
 import { mergeConfig } from "../src/config";
-import { autoPrune, pressureSummary, suggestPruneCandidates } from "../src/pruner";
+import {
+  autoPrune,
+  pressureSummary,
+  pruneSupersededAfterCollect,
+  suggestPruneCandidates,
+} from "../src/pruner";
 import { ChunkRegistry } from "../src/registry";
 import { renderChunkList, renderPressure } from "../src/render";
 import { restoreChunks } from "../src/restorer";
@@ -28,6 +33,8 @@ function testConfig(overrides?: Partial<PruneChunksConfig>): PruneChunksConfig {
       preserveRecentMinutes: 0,
       minChunkTokens: 1,
       maxChunksPerPass: 10,
+      pruneSupersededOnIngest: true,
+      pruneZeroMatchSearchesOnIngest: true,
     },
     tombstones: {
       includeSummary: true,
@@ -280,6 +287,8 @@ describe("pruner and restorer", () => {
         preserveRecentMinutes: 10,
         minChunkTokens: 500,
         maxChunksPerPass: 10,
+        pruneSupersededOnIngest: true,
+        pruneZeroMatchSearchesOnIngest: true,
       },
     });
     const registry = new ChunkRegistry();
@@ -319,6 +328,8 @@ describe("pruner and restorer", () => {
         preserveRecentMinutes: 0,
         minChunkTokens: 1,
         maxChunksPerPass: 10,
+        pruneSupersededOnIngest: true,
+        pruneZeroMatchSearchesOnIngest: true,
       },
     });
     const registry = new ChunkRegistry();
@@ -359,6 +370,8 @@ describe("pruner and restorer", () => {
         preserveRecentMinutes: 10,
         minChunkTokens: 500,
         maxChunksPerPass: 10,
+        pruneSupersededOnIngest: true,
+        pruneZeroMatchSearchesOnIngest: true,
       },
     });
     const registry = new ChunkRegistry();
@@ -414,6 +427,105 @@ describe("pruner and restorer", () => {
     );
   });
 
+  test("ingest pruning removes superseded reads, duplicate commands, zero-match searches, and old diffs", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const oldRead = addChunk(
+      registry,
+      config,
+      "read_old",
+      "read",
+      "compiler/interpreter.go:100: old context\n".repeat(120),
+      { path: "compiler/interpreter.go", startLine: 100, endLine: 180 },
+    );
+    const newRead = addChunk(
+      registry,
+      config,
+      "read_new",
+      "read",
+      "compiler/interpreter.go:120: newer context\n".repeat(120),
+      { path: "compiler/interpreter.go", startLine: 120, endLine: 220 },
+    );
+    const readPrune = pruneSupersededAfterCollect(registry, newRead, config);
+
+    assert.equal(registry.get(oldRead.id)?.pruned, true);
+    assert.equal(registry.get(newRead.id)?.pruned, false);
+    assert.ok(readPrune.pruned.some((result) => result.id === oldRead.id));
+
+    const firstCommand = addChunk(
+      registry,
+      config,
+      "cmd_1",
+      "bash",
+      "$ grep -n Variable ast/nodes.go\nast/nodes.go:10: Variable\n".repeat(80),
+      { command: 'grep -n "Variable" ast/nodes.go' },
+    );
+    const secondCommand = addChunk(
+      registry,
+      config,
+      "cmd_2",
+      "bash",
+      "$ grep -n Variable ast/nodes.go\nast/nodes.go:10: Variable\n".repeat(80),
+      { command: 'grep -n "Variable" ast/nodes.go' },
+    );
+    pruneSupersededAfterCollect(registry, secondCommand, config);
+
+    assert.equal(registry.get(firstCommand.id)?.pruned, true);
+    assert.equal(registry.get(secondCommand.id)?.pruned, false);
+
+    const zeroMatch = addChunk(
+      registry,
+      config,
+      "zero",
+      "code_search",
+      "0 exact matches. Maybe you meant this?\n".repeat(80),
+    );
+    pruneSupersededAfterCollect(registry, zeroMatch, config);
+    assert.equal(registry.get(zeroMatch.id)?.pruned, true);
+
+    const oldDiff = addChunk(
+      registry,
+      config,
+      "diff_old",
+      "git_diff",
+      "diff --git a/parser/quantifier_parser.go b/parser/quantifier_parser.go\n@@ -1 +1 @@\n-old\n+new\n".repeat(
+        40,
+      ),
+    );
+    const newDiff = addChunk(
+      registry,
+      config,
+      "diff_new",
+      "git_diff",
+      "diff --git a/parser/quantifier_parser.go b/parser/quantifier_parser.go\n@@ -1 +1 @@\n-new\n+newer\n".repeat(
+        40,
+      ),
+    );
+    pruneSupersededAfterCollect(registry, newDiff, config);
+    assert.equal(registry.get(oldDiff.id)?.pruned, true);
+    assert.equal(registry.get(newDiff.id)?.pruned, false);
+
+    const pinnedRead = addChunk(
+      registry,
+      config,
+      "read_pinned",
+      "read",
+      "compiler/pinned.go:10: pinned context\n".repeat(120),
+      { path: "compiler/pinned.go", startLine: 10, endLine: 90 },
+    );
+    registry.pin([pinnedRead.id], "still relevant");
+    const overlappingPinnedRead = addChunk(
+      registry,
+      config,
+      "read_pinned_new",
+      "read",
+      "compiler/pinned.go:20: newer pinned context\n".repeat(120),
+      { path: "compiler/pinned.go", startLine: 20, endLine: 100 },
+    );
+    pruneSupersededAfterCollect(registry, overlappingPinnedRead, config);
+    assert.equal(registry.get(pinnedRead.id)?.pruned, false);
+  });
+
   test("auto-prune protects anchor files and delays unbounded file reads", () => {
     const config = mergeConfig({
       track: { minChunkTokens: 1 },
@@ -425,6 +537,8 @@ describe("pruner and restorer", () => {
         preserveRecentMinutes: 0,
         minChunkTokens: 1,
         maxChunksPerPass: 10,
+        pruneSupersededOnIngest: true,
+        pruneZeroMatchSearchesOnIngest: true,
       },
     });
     const registry = new ChunkRegistry();
@@ -770,6 +884,8 @@ describe("extension integration", () => {
           preserveRecentMinutes: 0,
           minChunkTokens: 1,
           maxChunksPerPass: 10,
+          pruneSupersededOnIngest: true,
+          pruneZeroMatchSearchesOnIngest: true,
         },
         tombstones: {
           includeSummary: true,
@@ -895,6 +1011,42 @@ describe("extension integration", () => {
     assert.ok(compacted.length < 500);
     assert.equal(originalMessages[0].content[0].text, validationText);
     assert.equal(providerMessages[1].content[0].text, "continue fixing the edit");
+  });
+
+  test("tool_result hook persists immediate pruning of superseded chunks", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.handlers.tool_result?.({
+      toolCallId: "first_read",
+      toolName: "read",
+      params: { path: "compiler/interpreter.go", startLine: 10, endLine: 90 },
+      content: textBlock("compiler/interpreter.go:10: first read\n".repeat(140)),
+    });
+    await pi.handlers.tool_result?.({
+      toolCallId: "second_read",
+      toolName: "read",
+      params: { path: "compiler/interpreter.go", startLine: 50, endLine: 130 },
+      content: textBlock("compiler/interpreter.go:50: overlapping read\n".repeat(140)),
+    });
+
+    const active = await pi.tools.list_context_chunks.execute("active", {
+      pruned: false,
+      sortBy: "age",
+      limit: 10,
+    });
+    const pruned = await pi.tools.list_context_chunks.execute("pruned", {
+      pruned: true,
+      sortBy: "age",
+      limit: 10,
+    });
+
+    assert.equal(active.details.chunks.length, 1);
+    assert.equal(active.details.chunks[0].source.toolCallId, "second_read");
+    assert.equal(pruned.details.chunks.length, 1);
+    assert.equal(pruned.details.chunks[0].source.toolCallId, "first_read");
+    assert.match(pruned.details.chunks[0].pruneReason, /overlapping file read/);
+    assert.ok(pi.entries.length > 0, "immediate stale pruning should persist metadata");
   });
 });
 
