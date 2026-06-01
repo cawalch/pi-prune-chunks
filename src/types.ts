@@ -50,6 +50,7 @@ export interface ContextChunk {
   source?: ChunkSource;
   restoreMode: RestoreMode;
   restoreAvailable: boolean;
+  restoreUnavailableReason?: string;
 }
 
 export type PreserveContext = {
@@ -146,7 +147,9 @@ export type ChunkListOutput = {
     tokenEstimate: number;
     pruned: boolean;
     pinned: boolean;
+    restoreMode: RestoreMode;
     restoreAvailable: boolean;
+    restoreUnavailableReason?: string;
     summary?: string;
     source?: ChunkSource;
     createdAt: number;
