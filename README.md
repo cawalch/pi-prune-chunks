@@ -98,6 +98,7 @@ and recommended prune candidates.
 - `/prune-suggest --limit 10` lists safe candidates without pruning.
 - `/prune-now --target 45000 --dry-run` previews safe immediate pruning.
 - `/prune-now` prunes up to the configured max safe candidates.
+- `/prune-restore pc_0001_a1b2c3` restores one or more pruned chunks.
 
 ## Configuration
 

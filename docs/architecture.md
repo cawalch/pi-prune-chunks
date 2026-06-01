@@ -15,6 +15,8 @@ The extension entry point wires these layers into Pi hooks:
 - `context` auto-prunes when configured and replaces pruned tool-result messages
   in the copied provider context.
 - tools and commands expose list, prune, restore, pin, unpin, and pressure flows.
+  `/prune-restore` is a command wrapper over the same restore path as the
+  `restore_chunks` tool.
 
 The saved transcript remains the source of truth. Pruning state is metadata over
 that transcript, not a destructive transcript edit.
