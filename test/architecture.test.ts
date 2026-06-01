@@ -29,7 +29,12 @@ function testConfig(overrides?: Partial<PruneChunksConfig>): PruneChunksConfig {
       minChunkTokens: 1,
       maxChunksPerPass: 10,
     },
-    tombstones: { includeSummary: true, includeRestoreHint: true, maxSummaryChars: 80 },
+    tombstones: {
+      includeSummary: true,
+      includeRestoreHint: true,
+      maxSummaryChars: 80,
+      compactAtPercent: 90,
+    },
     ...overrides,
   });
 }
@@ -203,6 +208,26 @@ describe("registry and tombstones", () => {
     assert.notEqual(applied.messages[0], original[0]);
     assert.equal(original[0].content[0].text, "large context\n".repeat(200));
     assert.ok(applied.messages[0].content[0].text?.includes("[pruned:"));
+  });
+
+  test("renders compact tombstones for high-pressure context", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const chunk = addChunk(
+      registry,
+      config,
+      "tool_1",
+      "code_context",
+      "large context\n".repeat(200),
+    );
+    registry.prune([chunk.id], "done");
+
+    const normal = tombstoneFor(chunk, config)[0].text ?? "";
+    const compact = tombstoneFor(chunk, config, { compact: true })[0].text ?? "";
+    assert.ok(compact.includes(`[pruned:${chunk.id}`));
+    assert.ok(compact.includes("restore_chunks"));
+    assert.equal(compact.includes("summary="), false);
+    assert.ok(compact.length < normal.length / 2);
   });
 });
 
@@ -697,6 +722,39 @@ describe("extension integration", () => {
 
     assert.ok(pi.ui.notices.at(-1)?.includes(`  ${id}: restored via memory`));
     assert.ok(pi.entries.length > 0, "restore command should persist metadata");
+  });
+
+  test("context hook uses compact tombstones when provider context is over pressure", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.handlers.tool_result?.({
+      toolCallId: "tool_a",
+      toolName: "code_search",
+      content: textBlock("src/a.ts:1: result\n".repeat(250)),
+    });
+    const list = await pi.tools.list_context_chunks.execute("list", { sortBy: "tokens" });
+    const id = /pc_[0-9a-z]+_[0-9a-f]{6}/.exec(list.content[0].text)?.[0];
+    assert.ok(id);
+    await pi.tools.prune_chunks.execute("prune", { ids: [id], reason: "test compact" });
+
+    const contextResult = await pi.handlers.context?.(
+      {
+        messages: [
+          {
+            role: "toolResult",
+            toolCallId: "tool_a",
+            content: textBlock("src/a.ts:1: result\n".repeat(250)),
+          },
+        ],
+      },
+      {
+        getContextUsage: () => ({ tokens: 65_560, contextWindow: 49_152, percent: 133 }),
+      },
+    );
+
+    const tombstone = contextResult?.messages[0].content[0].text ?? "";
+    assert.match(tombstone, new RegExp(`^\\[pruned:${id} search ~\\d+t; restore_chunks\\]$`));
   });
 });
 

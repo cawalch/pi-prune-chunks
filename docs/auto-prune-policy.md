@@ -21,6 +21,13 @@ If the system prompt and conversation history already exceed the configured
 target, the report says the target cannot be reached by pruning tracked chunks
 alone.
 
+Tombstones are normally informative, with label, source, bounded summary, and
+restore hint. At high provider-context pressure, the context hook switches to
+compact tombstones that keep only the chunk ID, kind, token estimate, and restore
+marker. This preserves restorability while preventing large numbers of pruned
+chunks from creating enough tombstone overhead to break compaction or provider
+requests.
+
 File reads are treated more carefully than search and context-pack output:
 instruction files, manifests, and common entrypoints are high risk and are not
 auto-pruned; unbounded whole-file reads are medium risk and are held until the

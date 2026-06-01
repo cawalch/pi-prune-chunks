@@ -99,6 +99,7 @@ export type PruneChunksConfig = {
     includeSummary: boolean;
     includeRestoreHint: boolean;
     maxSummaryChars: number;
+    compactAtPercent: number;
   };
   restore: {
     memory: boolean;

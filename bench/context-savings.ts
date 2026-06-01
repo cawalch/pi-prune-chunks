@@ -11,7 +11,12 @@ import {
 
 const CONFIG = mergeConfig({
   track: { minChunkTokens: 1 },
-  tombstones: { includeSummary: true, includeRestoreHint: true, maxSummaryChars: 120 },
+  tombstones: {
+    includeSummary: true,
+    includeRestoreHint: true,
+    maxSummaryChars: 120,
+    compactAtPercent: 90,
+  },
 });
 
 const SIMULATED_RESULTS: Array<{ tool: string; text: string }> = [];
