@@ -309,6 +309,22 @@ function registerCommands(
       notify(ctx, renderActionResults("pruned", ids, results));
     },
   });
+
+  pi.registerCommand("prune-restore", {
+    description: "Restore pruned chunks by ID",
+    async run(args, ctx) {
+      const ids = idsFromCommandArgs(parseCommandArgs(args));
+      if (ids.length === 0) {
+        notify(ctx, "Usage: /prune-restore <id> [id...]");
+        return;
+      }
+      const results = await restoreChunks(registry, ids, config, {
+        cwd: currentWorkingDirectory(ctx),
+      });
+      persistState();
+      notify(ctx, renderActionResults("restored", ids, results));
+    },
+  });
 }
 
 function resolveConfig(pi: ExtensionAPI): PruneChunksConfig {
@@ -470,6 +486,14 @@ function parseCommandArgs(args: unknown): string[] {
     return parseCommandArgs((args as { raw: string }).raw);
   }
   return [];
+}
+
+function idsFromCommandArgs(args: string[]): string[] {
+  return args
+    .filter((arg) => !arg.startsWith("--"))
+    .flatMap((arg) => arg.split(","))
+    .map((arg) => arg.trim())
+    .filter(Boolean);
 }
 
 function stringOption(args: string[], name: string): string | undefined {

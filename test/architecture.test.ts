@@ -667,6 +667,37 @@ describe("extension integration", () => {
     assert.equal(messages[0].content[0].text, "src/a.ts:1: result\n".repeat(250));
     assert.ok(pi.entries.length > 0, "auto-prune should persist metadata");
   });
+
+  test("prune-restore command restores pruned chunks", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    for (const name of [
+      "prune-status",
+      "prune-largest",
+      "prune-suggest",
+      "prune-now",
+      "prune-restore",
+    ]) {
+      assert.ok(pi.commands[name], `${name} was not registered`);
+    }
+
+    await pi.handlers.tool_result?.({
+      toolCallId: "tool_restore",
+      toolName: "code_search",
+      content: textBlock("src/restore.ts:1: result\n".repeat(250)),
+    });
+
+    const list = await pi.tools.list_context_chunks.execute("list", { sortBy: "tokens" });
+    const id = /pc_[0-9a-z]+_[0-9a-f]{6}/.exec(list.content[0].text)?.[0];
+    assert.ok(id);
+
+    await pi.tools.prune_chunks.execute("prune", { ids: [id], reason: "test command" });
+    await pi.commands["prune-restore"].run(id, { ui: pi.ui });
+
+    assert.ok(pi.ui.notices.at(-1)?.includes(`  ${id}: restored via memory`));
+    assert.ok(pi.entries.length > 0, "restore command should persist metadata");
+  });
 });
 
 function createMockPi(config: PruneChunksConfig) {
