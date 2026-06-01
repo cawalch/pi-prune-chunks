@@ -20,6 +20,8 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     includeRestoreHint: true,
     maxSummaryChars: 180,
     compactAtPercent: 90,
+    coalesceAtPercent: 98,
+    maxCoalescedEntries: 120,
   },
   restore: {
     memory: true,
@@ -58,6 +60,10 @@ export function mergeConfig(input?: Partial<PruneChunksConfig> | null): PruneChu
         input.tombstones?.maxSummaryChars ?? DEFAULT_CONFIG.tombstones.maxSummaryChars,
       compactAtPercent:
         input.tombstones?.compactAtPercent ?? DEFAULT_CONFIG.tombstones.compactAtPercent,
+      coalesceAtPercent:
+        input.tombstones?.coalesceAtPercent ?? DEFAULT_CONFIG.tombstones.coalesceAtPercent,
+      maxCoalescedEntries:
+        input.tombstones?.maxCoalescedEntries ?? DEFAULT_CONFIG.tombstones.maxCoalescedEntries,
     },
     restore: {
       memory: input.restore?.memory ?? DEFAULT_CONFIG.restore.memory,

@@ -16,6 +16,8 @@ const CONFIG = mergeConfig({
     includeRestoreHint: true,
     maxSummaryChars: 120,
     compactAtPercent: 90,
+    coalesceAtPercent: 110,
+    maxCoalescedEntries: 120,
   },
 });
 
@@ -294,3 +296,63 @@ function simulate() {
 }
 
 simulate();
+
+function simulateExtremeTombstoneOverhead() {
+  idCounter = 0;
+  const registry = new ChunkRegistry();
+  const messages: Array<{ toolCallId: string; text: string }> = [];
+
+  for (let i = 0; i < 100; i++) {
+    const result = SIMULATED_RESULTS[i % SIMULATED_RESULTS.length];
+    const id = nextId();
+    const text = `${result.text}\nrepeat-${i}\n`.repeat(2);
+    const content = [{ type: "text" as const, text }];
+    const collected = collectToolResult({
+      toolCallId: id,
+      toolName: result.tool,
+      content,
+      config: CONFIG,
+    });
+    if (!collected) continue;
+    registry.addCollected(collected);
+    messages.push({ toolCallId: id, text });
+  }
+
+  const chunks = registry.all();
+  const prunedIds = chunks.slice(0, 95).map((chunk) => chunk.id);
+  registry.prune(prunedIds, "extreme tombstone-overhead fixture");
+
+  let fullTombstoneTokens = 0;
+  let compactTombstoneTokens = 0;
+  let activeTokens = 0;
+  const manifestIds: string[] = [];
+
+  for (const chunk of chunks) {
+    if (chunk.pruned) {
+      fullTombstoneTokens += estimateTokens(tombstoneFor(chunk, CONFIG)[0].text ?? "");
+      compactTombstoneTokens += estimateTokens(
+        tombstoneFor(chunk, CONFIG, { compact: true })[0].text ?? "",
+      );
+      manifestIds.push(chunk.id);
+    } else {
+      activeTokens += chunk.tokenEstimate;
+    }
+  }
+
+  const manifestText =
+    `[pruned-manifest ${manifestIds.length} chunks; restore_chunks ids=` +
+    `${manifestIds.join(",")}]`;
+  const manifestTokens = estimateTokens(manifestText);
+
+  console.log("\nExtreme tombstone-overhead fixture:");
+  console.log("  Shape:           100 tracked, 95 pruned, 5 active");
+  console.log("  Observed class:  provider usage over-window while active chunks are tiny");
+  console.log(`  Input messages:  ${messages.length}`);
+  console.log(`  Active tokens:   ${activeTokens}`);
+  console.log(`  Full tombstones: ${fullTombstoneTokens} tokens across 95 messages`);
+  console.log(`  Compact stones:  ${compactTombstoneTokens} tokens across 95 messages`);
+  console.log(`  Manifest:        ${manifestTokens} tokens across 1 message`);
+  console.log("  Regression:      context hook should coalesce old pruned messages before compaction");
+}
+
+simulateExtremeTombstoneOverhead();
