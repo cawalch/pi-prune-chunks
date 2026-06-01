@@ -49,11 +49,12 @@ rewrite saved transcript messages.
 
 File reads are treated more carefully than search and context-pack output:
 instruction files, manifests, and common entrypoints are high risk and are not
-auto-pruned; unbounded whole-file reads are medium risk and are held until the
-session reaches a higher pressure band. This delay applies only to file reads
-with a concrete source path; pathless orientation output and directory trees are
-eligible like other exploratory context. Bounded source ranges remain low-risk
-because they can usually be rehydrated.
+auto-pruned; large unbounded whole-file reads are medium risk and are held until
+the session reaches a higher pressure band. Short non-anchor file reads and
+bounded source ranges are low risk because they are easier to restore or repeat.
+This delay applies only to file reads with a concrete source path; pathless
+orientation output and directory trees are eligible like other exploratory
+context.
 
 Working-context protection adds another guard above generic scoring. If the
 latest user or assistant message mentions a tracked source path, or Pi exposes
