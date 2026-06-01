@@ -1,7 +1,24 @@
 import { truncateText } from "./text";
 import type { ContentBlock, ContextChunk, PruneChunksConfig } from "./types";
 
-export function tombstoneFor(chunk: ContextChunk, config: PruneChunksConfig): ContentBlock[] {
+export type TombstoneOptions = {
+  compact?: boolean;
+};
+
+export function tombstoneFor(
+  chunk: ContextChunk,
+  config: PruneChunksConfig,
+  options: TombstoneOptions = {},
+): ContentBlock[] {
+  if (options.compact) {
+    return [
+      {
+        type: "text",
+        text: `[pruned:${chunk.id} ${chunk.kind} ~${chunk.tokenEstimate}t; restore_chunks]`,
+      },
+    ];
+  }
+
   const source = sourceText(chunk);
   const summary =
     config.tombstones.includeSummary && chunk.summary
@@ -27,6 +44,7 @@ export function applyPrunedTombstones<
   messages: T[],
   getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
   config: PruneChunksConfig,
+  options: TombstoneOptions = {},
 ): { messages: T[]; modified: boolean } {
   let modified = false;
   const mapped = messages.map((message) => {
@@ -36,7 +54,7 @@ export function applyPrunedTombstones<
     modified = true;
     return {
       ...message,
-      content: tombstoneFor(chunk, config),
+      content: tombstoneFor(chunk, config, options),
     };
   });
   return { messages: mapped, modified };

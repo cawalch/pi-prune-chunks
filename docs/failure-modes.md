@@ -20,6 +20,11 @@ post-prune percentage so this does not look like a chunk-pruning bug.
 Tombstones can still confuse a model if they are too noisy or too terse. Keep
 summaries bounded and restore only the specific chunks needed.
 
+Many pruned chunks can make tombstone overhead material. When provider context
+reaches the configured compact tombstone threshold, the context hook emits
+minimal tombstones so old pruned-tool markers do not themselves push Pi's
+auto-compaction or provider request over the context window.
+
 Raw tool output is not persisted by default. This protects privacy but means
 same-session memory restore is the only exact restore path unless source
 rehydration metadata is available. Chunks without source path and line-range

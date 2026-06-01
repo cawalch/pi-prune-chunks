@@ -122,7 +122,8 @@ Pi may provide extension config under `pruneChunks`:
     "tombstones": {
       "includeSummary": true,
       "includeRestoreHint": true,
-      "maxSummaryChars": 180
+      "maxSummaryChars": 180,
+      "compactAtPercent": 90
     },
     "restore": {
       "memory": true,
@@ -161,6 +162,9 @@ Raw tool output is not persisted to disk by default.
   conversation-level compression is a separate mechanism.
 - Transparent: every pruned chunk leaves a tombstone with ID, kind, tool, label,
   token estimate, optional summary, and restore hint.
+- High-pressure tombstones: once provider context reaches the compact threshold,
+  tombstones shrink to ID/kind/token markers to avoid tombstone overhead causing
+  compaction or provider-window failures.
 
 ## Development
 

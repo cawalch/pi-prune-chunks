@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { collectToolResult } from "./src/collector";
 import { mergeConfig } from "./src/config";
-import { autoPrune, suggestPruneCandidates } from "./src/pruner";
+import { autoPrune, contextPercent, suggestPruneCandidates } from "./src/pruner";
 import { ChunkRegistry } from "./src/registry";
 import {
   contextFooter,
@@ -84,6 +84,7 @@ export default function (pi: ExtensionAPI) {
       event.messages ?? [],
       (toolCallId) => registry.prunedForToolCall(toolCallId),
       config,
+      { compact: shouldCompactTombstones(usage, config) },
     );
 
     if (replacement.modified) {
@@ -466,6 +467,12 @@ function normalizePath(path: string): string {
 function currentWorkingDirectory(ctx: unknown): string | undefined {
   const cwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
   return typeof cwd === "string" ? cwd : undefined;
+}
+
+function shouldCompactTombstones(usage: ContextUsage | null, config: PruneChunksConfig): boolean {
+  const pct = contextPercent(usage);
+  if (pct != null && pct >= config.tombstones.compactAtPercent) return true;
+  return !!usage?.contextWindow && usage.tokens != null && usage.tokens > usage.contextWindow;
 }
 
 function notify(ctx: unknown, text: string): void {
