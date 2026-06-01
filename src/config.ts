@@ -23,6 +23,10 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     coalesceAtPercent: 98,
     maxCoalescedEntries: 120,
   },
+  contextGuards: {
+    compactFailedToolValidation: true,
+    maxFailedToolValidationChars: 1200,
+  },
   restore: {
     memory: true,
     diskCache: false,
@@ -64,6 +68,14 @@ export function mergeConfig(input?: Partial<PruneChunksConfig> | null): PruneChu
         input.tombstones?.coalesceAtPercent ?? DEFAULT_CONFIG.tombstones.coalesceAtPercent,
       maxCoalescedEntries:
         input.tombstones?.maxCoalescedEntries ?? DEFAULT_CONFIG.tombstones.maxCoalescedEntries,
+    },
+    contextGuards: {
+      compactFailedToolValidation:
+        input.contextGuards?.compactFailedToolValidation ??
+        DEFAULT_CONFIG.contextGuards.compactFailedToolValidation,
+      maxFailedToolValidationChars:
+        input.contextGuards?.maxFailedToolValidationChars ??
+        DEFAULT_CONFIG.contextGuards.maxFailedToolValidationChars,
     },
     restore: {
       memory: input.restore?.memory ?? DEFAULT_CONFIG.restore.memory,

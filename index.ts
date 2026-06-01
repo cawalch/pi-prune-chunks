@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { collectToolResult } from "./src/collector";
 import { mergeConfig } from "./src/config";
+import { compactFailedToolValidationMessages } from "./src/contextGuards";
 import { autoPrune, contextPercent, suggestPruneCandidates } from "./src/pruner";
 import { ChunkRegistry } from "./src/registry";
 import {
@@ -80,7 +81,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("prune-chunks", contextFooter(registry, usage));
     }
 
-    const replacement = applyPrunedTombstones(
+    const tombstones = applyPrunedTombstones(
       event.messages ?? [],
       (toolCallId) => registry.prunedForToolCall(toolCallId),
       config,
@@ -89,9 +90,10 @@ export default function (pi: ExtensionAPI) {
         coalesce: shouldCoalesceTombstones(usage, config),
       },
     );
+    const guarded = compactFailedToolValidationMessages(tombstones.messages, config);
 
-    if (replacement.modified) {
-      return { messages: replacement.messages };
+    if (tombstones.modified || guarded.modified) {
+      return { messages: guarded.messages };
     }
   });
 

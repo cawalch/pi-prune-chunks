@@ -127,6 +127,10 @@ Pi may provide extension config under `pruneChunks`:
       "coalesceAtPercent": 98,
       "maxCoalescedEntries": 120
     },
+    "contextGuards": {
+      "compactFailedToolValidation": true,
+      "maxFailedToolValidationChars": 1200
+    },
     "restore": {
       "memory": true,
       "diskCache": false,
@@ -171,6 +175,9 @@ Raw tool output is not persisted to disk by default.
   pruned tool-result tombstones are collapsed into a small manifest message with
   restore IDs instead of preserving one provider message per pruned chunk. The
   saved transcript remains unchanged.
+- Failed-tool validation guard: oversized validation errors that echo full tool
+  arguments are compacted in provider context, preserving the schema error and
+  omitting the raw `Received arguments` payload.
 
 ## Development
 
