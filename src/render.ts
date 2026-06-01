@@ -17,7 +17,7 @@ export function renderChunkList(output: ChunkListOutput): string {
   const lines = [
     `Tracked chunks: ${output.totalChunks} total, ~${output.totalTokens}t tracked, ~${output.prunedTokens}t pruned`,
     "",
-    "id              kind          risk    pin prune tokens label",
+    "id              kind          risk    pin prune tokens restore          label",
   ];
 
   for (const chunk of output.chunks) {
@@ -29,12 +29,20 @@ export function renderChunkList(output: ChunkListOutput): string {
         (chunk.pinned ? "yes" : "no ").padEnd(3),
         (chunk.pruned ? "yes" : "no ").padEnd(5),
         String(chunk.tokenEstimate).padStart(6),
+        restoreLabel(chunk).padEnd(16),
         chunk.label,
       ].join(" "),
     );
   }
 
   return lines.join("\n");
+}
+
+function restoreLabel(chunk: ChunkListOutput["chunks"][number]): string {
+  if (chunk.restoreAvailable) return chunk.restoreMode;
+  return chunk.restoreUnavailableReason
+    ? `unavailable: ${chunk.restoreUnavailableReason}`
+    : "unavailable";
 }
 
 export function renderActionResults(

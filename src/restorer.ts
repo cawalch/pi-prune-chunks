@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import type { ChunkRegistry } from "./registry";
+import { type ChunkRegistry, restoreUnavailableReason } from "./registry";
 import type { ChunkActionResult, ContentBlock, PruneChunksConfig } from "./types";
 
 export async function restoreChunks(
@@ -26,8 +26,10 @@ export async function restoreChunks(
       continue;
     }
 
-    if (config.restore.sourceRehydrate && canSourceRehydrate(chunk.source)) {
-      const rehydrated = await rehydrateFromSource(chunk.source, options.cwd);
+    const source = chunk.source;
+    const canRehydrate = canSourceRehydrate(source);
+    if (config.restore.sourceRehydrate && canRehydrate) {
+      const rehydrated = await rehydrateFromSource(source, options.cwd);
       if (rehydrated.status === "ok") {
         registry.setContent(id, [{ type: "text", text: rehydrated.text }]);
         results.push(registry.restore(id, "source_rehydrate"));
@@ -43,11 +45,16 @@ export async function restoreChunks(
       continue;
     }
 
+    const reason = config.restore.sourceRehydrate
+      ? restoreUnavailableReason(false, chunk.source)
+      : canRehydrate
+        ? "no memory content and source rehydrate is disabled"
+        : restoreUnavailableReason(false, chunk.source);
     results.push({
       id,
       status: "unavailable",
       tokens: 0,
-      reason: "no memory content or source range is available",
+      reason: reason ?? "no memory content or restore source is available",
       restoreMode: "unavailable",
     });
   }

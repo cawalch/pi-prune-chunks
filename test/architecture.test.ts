@@ -8,7 +8,7 @@ import { classifyKind, classifyRisk, collectToolResult } from "../src/collector"
 import { mergeConfig } from "../src/config";
 import { autoPrune, pressureSummary, suggestPruneCandidates } from "../src/pruner";
 import { ChunkRegistry } from "../src/registry";
-import { renderPressure } from "../src/render";
+import { renderChunkList, renderPressure } from "../src/render";
 import { restoreChunks } from "../src/restorer";
 import { applyPrunedTombstones, tombstoneFor } from "../src/tombstones";
 import type { ContentBlock, ContextUsage, PruneChunksConfig } from "../src/types";
@@ -132,6 +132,7 @@ describe("registry and tombstones", () => {
     assert.equal(list.listed, 1);
     assert.equal(list.chunks[0].id, chunk.id);
     assert.equal(list.chunks[0].restoreAvailable, true);
+    assert.equal(list.chunks[0].restoreMode, "memory");
 
     const persisted = registry.persistenceState();
     assert.equal(persisted.chunks[0].pinned, true);
@@ -139,6 +140,32 @@ describe("registry and tombstones", () => {
       JSON.stringify(persisted).includes("src/a.ts:1: result\\nsrc/a.ts:1: result"),
       false,
     );
+  });
+
+  test("metadata restore explains why exact restore is unavailable", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const chunk = addChunk(
+      registry,
+      config,
+      "search_1",
+      "code_search",
+      "symbol result without source location\n".repeat(80),
+    );
+    registry.prune([chunk.id], "manual");
+
+    const resumed = new ChunkRegistry();
+    resumed.restorePersistence(registry.persistenceState());
+    const listed = resumed.list({ pruned: true });
+    const rendered = renderChunkList(listed);
+
+    assert.equal(listed.chunks[0].restoreAvailable, false);
+    assert.equal(listed.chunks[0].restoreMode, "unavailable");
+    assert.equal(
+      listed.chunks[0].restoreUnavailableReason,
+      "no memory content or source path metadata",
+    );
+    assert.ok(rendered.includes("unavailable: no memory content or source path metadata"));
   });
 
   test("renders compact tombstones and does not mutate original messages", () => {
@@ -562,6 +589,22 @@ describe("pruner and restorer", () => {
     const sourceResult = await restoreChunks(resumed, [chunk.id], config, { cwd });
     assert.equal(sourceResult[0].status, "restored");
     assert.equal(sourceResult[0].restoreMode, "source_rehydrate");
+  });
+
+  test("restore reports specific unavailable reasons", async () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const pathOnly = addChunk(registry, config, "path_only", "read", "source file\n".repeat(80), {
+      path: "src/a.ts",
+    });
+    registry.prune([pathOnly.id], "manual");
+
+    const resumed = new ChunkRegistry();
+    resumed.restorePersistence(registry.persistenceState());
+    const [result] = await restoreChunks(resumed, [pathOnly.id], config);
+
+    assert.equal(result.status, "unavailable");
+    assert.equal(result.reason, "no memory content or source line range metadata");
   });
 });
 
