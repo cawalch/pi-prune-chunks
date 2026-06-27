@@ -5,7 +5,10 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-export function contentText(content: ContentBlock[]): string {
+export function contentText(content: ContentBlock[] | string | undefined | null): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return String(content);
   return content
     .filter((block) => block.type === "text" && typeof block.text === "string" && block.text)
     .map((block) => block.text ?? "")

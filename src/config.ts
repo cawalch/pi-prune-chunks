@@ -17,6 +17,9 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     pruneSupersededOnIngest: true,
     pruneZeroMatchSearchesOnIngest: true,
   },
+  reamerx: {
+    pruneExploratoryAfterTerminal: true,
+  },
   tombstones: {
     includeSummary: true,
     includeRestoreHint: true,
@@ -63,6 +66,11 @@ export function mergeConfig(input?: Partial<PruneChunksConfig> | null): PruneChu
       pruneZeroMatchSearchesOnIngest:
         input.autoPrune?.pruneZeroMatchSearchesOnIngest ??
         DEFAULT_CONFIG.autoPrune.pruneZeroMatchSearchesOnIngest,
+    },
+    reamerx: {
+      pruneExploratoryAfterTerminal:
+        input.reamerx?.pruneExploratoryAfterTerminal ??
+        DEFAULT_CONFIG.reamerx.pruneExploratoryAfterTerminal,
     },
     tombstones: {
       includeSummary: input.tombstones?.includeSummary ?? DEFAULT_CONFIG.tombstones.includeSummary,

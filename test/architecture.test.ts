@@ -4,11 +4,18 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { describe } from "node:test";
 import extension, { preserveContext } from "../index";
-import { classifyKind, classifyRisk, collectToolResult } from "../src/collector";
+import {
+  classifyKind,
+  classifyRisk,
+  collectToolResult,
+  isReamerxExploratoryTool,
+  isReamerxTerminalTool,
+} from "../src/collector";
 import { mergeConfig } from "../src/config";
 import {
   autoPrune,
   pressureSummary,
+  pruneReamerxExploratoryAfterTerminal,
   pruneSupersededAfterCollect,
   suggestPruneCandidates,
 } from "../src/pruner";
@@ -102,6 +109,19 @@ describe("collector", () => {
       "low",
     );
     assert.equal(classifyKind("ffgrep", "parser/expression_parser.go\n  309: hit", {}), "search");
+  });
+
+  test("classifies ReamerX Pi/MCP exploratory and terminal tools", () => {
+    assert.equal(classifyKind("reamerx_repo_map", "ReamerX repo-map", {}), "outline");
+    assert.equal(classifyKind("mcp__reamerx__trace", "call graph", {}), "flow_trace");
+    assert.equal(classifyKind("reamerx.impact", "callers and tests", {}), "flow_trace");
+    assert.equal(classifyKind("reamerx_context", "source context", {}), "context_pack");
+    assert.equal(classifyKind("edit_pack", "patch-ready bundle", {}), "context_pack");
+    assert.equal(classifyKind("reamerx_changes", "diff --git a/a.ts b/a.ts", {}), "diff");
+    assert.equal(isReamerxExploratoryTool("reamerx_trace"), true);
+    assert.equal(isReamerxExploratoryTool("mcp__reamerx__impact"), true);
+    assert.equal(isReamerxTerminalTool("reamerx_edit_pack"), true);
+    assert.equal(isReamerxTerminalTool("reamerx.repo_map"), false);
   });
 
   test("collects metadata with stable source and bounded summary", () => {
@@ -507,6 +527,116 @@ describe("pruner and restorer", () => {
       candidates.some((candidate) => candidate.id === unique.id),
       true,
     );
+  });
+
+  test("terminal ReamerX evidence prunes prior exploratory chunks and preserves terminal evidence", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const repoMap = addChunk(
+      registry,
+      config,
+      "repo_map",
+      "reamerx_repo_map",
+      "large repo map\n".repeat(160),
+    );
+    const trace = addChunk(
+      registry,
+      config,
+      "trace",
+      "mcp__reamerx__trace",
+      "large trace\n".repeat(160),
+    );
+    const terminal = addChunk(
+      registry,
+      config,
+      "edit_pack",
+      "reamerx_edit_pack",
+      "patch-ready bundle\n".repeat(160),
+    );
+
+    const result = pruneReamerxExploratoryAfterTerminal(registry, terminal, config);
+
+    assert.equal(result.triggered, true);
+    assert.equal(result.pruned.length, 2);
+    assert.equal(registry.get(repoMap.id)?.pruned, true);
+    assert.equal(registry.get(trace.id)?.pruned, true);
+    assert.equal(registry.get(terminal.id)?.pruned, false);
+
+    const applied = applyPrunedTombstones(
+      [
+        {
+          role: "toolResult",
+          toolCallId: "repo_map",
+          content: textBlock("large repo map\n".repeat(160)),
+        },
+        {
+          role: "toolResult",
+          toolCallId: "trace",
+          content: textBlock("large trace\n".repeat(160)),
+        },
+        {
+          role: "toolResult",
+          toolCallId: "edit_pack",
+          content: textBlock("patch-ready bundle\n".repeat(160)),
+        },
+      ],
+      (toolCallId) => registry.prunedForToolCall(toolCallId),
+      config,
+    );
+    assert.equal(applied.modified, true);
+    assert.ok(applied.messages[0].content[0].text?.includes("[pruned:"));
+    assert.ok(applied.messages[1].content[0].text?.includes("[pruned:"));
+    assert.equal(applied.messages[2].content[0].text, "patch-ready bundle\n".repeat(160));
+  });
+
+  test("terminal ReamerX pruning is configurable and skips pinned/high-risk chunks", () => {
+    const config = testConfig({ reamerx: { pruneExploratoryAfterTerminal: false } });
+    const registry = new ChunkRegistry();
+    const exploratory = addChunk(
+      registry,
+      config,
+      "repo_map",
+      "reamerx_repo_map",
+      "large repo map\n".repeat(160),
+    );
+    const terminal = addChunk(
+      registry,
+      config,
+      "edit_pack",
+      "reamerx_edit_pack",
+      "patch-ready bundle\n".repeat(160),
+    );
+
+    const disabled = pruneReamerxExploratoryAfterTerminal(registry, terminal, config);
+    assert.equal(disabled.triggered, false);
+    assert.equal(registry.get(exploratory.id)?.pruned, false);
+
+    const enabledConfig = testConfig();
+    const pinnedRegistry = new ChunkRegistry();
+    const pinned = addChunk(
+      pinnedRegistry,
+      enabledConfig,
+      "trace",
+      "reamerx_trace",
+      "large trace\n".repeat(160),
+    );
+    pinnedRegistry.pin([pinned.id], "still relevant");
+    const enabledTerminal = addChunk(
+      pinnedRegistry,
+      enabledConfig,
+      "edit_pack",
+      "reamerx_edit_pack",
+      "patch-ready bundle\n".repeat(160),
+    );
+
+    const enabled = pruneReamerxExploratoryAfterTerminal(
+      pinnedRegistry,
+      enabledTerminal,
+      enabledConfig,
+    );
+    assert.equal(enabled.triggered, true);
+    assert.equal(enabled.pruned.length, 0);
+    assert.equal(pinnedRegistry.get(pinned.id)?.pruned, false);
   });
 
   test("ingest pruning removes superseded reads, duplicate commands, zero-match searches, and old diffs", () => {
