@@ -10,6 +10,7 @@ import { compactFailedToolValidationMessages } from "./src/contextGuards";
 import {
   autoPrune,
   contextPercent,
+  pruneReamerxExploratoryAfterTerminal,
   pruneSupersededAfterCollect,
   suggestPruneCandidates,
 } from "./src/pruner";
@@ -62,7 +63,11 @@ export default function (pi: ExtensionAPI) {
     if (collected) {
       const chunk = registry.addCollected(collected);
       const stalePrune = pruneSupersededAfterCollect(registry, chunk, config);
-      if (stalePrune.pruned.some((result) => result.status === "pruned")) {
+      const reamerxPrune = pruneReamerxExploratoryAfterTerminal(registry, chunk, config);
+      if (
+        stalePrune.pruned.some((result) => result.status === "pruned") ||
+        reamerxPrune.pruned.some((result) => result.status === "pruned")
+      ) {
         persistState();
       }
     }

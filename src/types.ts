@@ -97,6 +97,9 @@ export type PruneChunksConfig = {
     pruneSupersededOnIngest: boolean;
     pruneZeroMatchSearchesOnIngest: boolean;
   };
+  reamerx: {
+    pruneExploratoryAfterTerminal: boolean;
+  };
   tombstones: {
     includeSummary: boolean;
     includeRestoreHint: boolean;

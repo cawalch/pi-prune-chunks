@@ -121,6 +121,9 @@ Pi may provide extension config under `pruneChunks`:
       "pruneSupersededOnIngest": true,
       "pruneZeroMatchSearchesOnIngest": true
     },
+    "reamerx": {
+      "pruneExploratoryAfterTerminal": true
+    },
     "tombstones": {
       "includeSummary": true,
       "includeRestoreHint": true,
@@ -168,6 +171,10 @@ Raw tool output is not persisted to disk by default.
   high-pressure band so auto-prune can keep working toward the configured target.
 - Pressure reports show non-chunk provider tokens and call out when the target
   cannot be reached by pruning tracked chunks alone.
+- ReamerX exploratory chunks (`repo_map`, `context`, `trace`, `impact`, `search`,
+  `symbols`, and Pi-prefixed equivalents) are tombstoned after terminal ReamerX
+  evidence (`edit_pack`, `slice`, or `changes`) is acquired, while the terminal
+  evidence remains active.
 - Exact duplicate tool outputs are scored higher as prune candidates.
 - Scope boundary: this extension prunes tracked tool-result chunks, not system
   prompts or ordinary conversation history. If non-chunk overhead dominates,

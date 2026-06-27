@@ -1,3 +1,4 @@
+import { isReamerxExploratoryTool, isReamerxTerminalTool } from "./collector";
 import type { ChunkRegistry } from "./registry";
 import type {
   ChunkActionResult,
@@ -34,6 +35,12 @@ export type AutoPruneResult = {
 };
 
 export type SupersededPruneResult = {
+  pruned: ChunkActionResult[];
+  savedTokens: number;
+};
+
+export type ReamerxTerminalPruneResult = {
+  triggered: boolean;
   pruned: ChunkActionResult[];
   savedTokens: number;
 };
@@ -165,6 +172,41 @@ export function pruneSupersededAfterCollect(
   }
 
   return {
+    pruned,
+    savedTokens: pruned.reduce((sum, result) => sum + result.tokens, 0),
+  };
+}
+
+export function pruneReamerxExploratoryAfterTerminal(
+  registry: ChunkRegistry,
+  terminalChunk: ContextChunk,
+  config: PruneChunksConfig,
+): ReamerxTerminalPruneResult {
+  if (!config.autoPrune.enabled || !config.reamerx.pruneExploratoryAfterTerminal) {
+    return { triggered: false, pruned: [], savedTokens: 0 };
+  }
+  if (!isReamerxTerminalTool(terminalChunk.toolName)) {
+    return { triggered: false, pruned: [], savedTokens: 0 };
+  }
+
+  const ids: string[] = [];
+  for (const chunk of registry.active()) {
+    if (chunk.id === terminalChunk.id) continue;
+    if (chunk.createdAt > terminalChunk.createdAt) continue;
+    if (!isReamerxExploratoryTool(chunk.toolName)) continue;
+    if (chunk.pinned || chunk.risk === "high" || !chunk.restoreAvailable) continue;
+    ids.push(chunk.id);
+  }
+
+  if (ids.length === 0) return { triggered: true, pruned: [], savedTokens: 0 };
+
+  const pruned = registry.prune(
+    ids,
+    `auto-prune: ReamerX exploratory results superseded by ${terminalChunk.toolName}`,
+    "auto_pruned",
+  );
+  return {
+    triggered: true,
     pruned,
     savedTokens: pruned.reduce((sum, result) => sum + result.tokens, 0),
   };

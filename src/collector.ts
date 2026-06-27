@@ -27,9 +27,22 @@ type ToolResultInput = {
 const REAMER_TOOL_KINDS: Record<string, ChunkKind> = {
   code_overview: "outline",
   repo_map: "outline",
+  reamerx_repo_map: "outline",
   code_context: "context_pack",
+  context: "context_pack",
+  reamerx_context: "context_pack",
+  edit_pack: "context_pack",
+  reamerx_edit_pack: "context_pack",
+  slice: "context_pack",
+  reamerx_slice: "context_pack",
   code_search: "search",
+  search: "search",
+  reamerx_search: "search",
   code_search_symbols: "symbol",
+  symbols: "symbol",
+  symbol: "symbol",
+  reamerx_symbols: "symbol",
+  reamerx_symbol: "symbol",
   code_read_range: "file_read",
   code_read_symbol: "symbol",
   code_outline: "outline",
@@ -37,7 +50,45 @@ const REAMER_TOOL_KINDS: Record<string, ChunkKind> = {
   code_pattern_search: "search",
   code_semantic_search: "search",
   code_flow_trace: "flow_trace",
+  trace: "flow_trace",
+  path: "flow_trace",
+  impact: "flow_trace",
+  reamerx_trace: "flow_trace",
+  reamerx_path: "flow_trace",
+  reamerx_impact: "flow_trace",
+  changes: "diff",
+  reamerx_changes: "diff",
 };
+
+const REAMERX_EXPLORATORY_TOOLS = new Set([
+  "repo_map",
+  "symbols",
+  "symbol",
+  "context",
+  "search",
+  "trace",
+  "path",
+  "impact",
+  "scan",
+  "reamerx_repo_map",
+  "reamerx_symbols",
+  "reamerx_symbol",
+  "reamerx_context",
+  "reamerx_search",
+  "reamerx_trace",
+  "reamerx_path",
+  "reamerx_impact",
+  "reamerx_scan",
+]);
+
+const REAMERX_TERMINAL_TOOLS = new Set([
+  "edit_pack",
+  "slice",
+  "changes",
+  "reamerx_edit_pack",
+  "reamerx_slice",
+  "reamerx_changes",
+]);
 
 const FLOW_TOOL_KINDS: Record<string, ChunkKind> = {
   flow_trace: "flow_trace",
@@ -75,6 +126,26 @@ export const TRACKED_TOOL_FAMILIES = new Set([
   ...Object.keys(FLOW_TOOL_KINDS),
   ...Object.keys(GENERIC_TOOL_KINDS),
 ]);
+
+export function normalizeReamerxToolName(toolName: string): string {
+  let normalized = toolName.toLowerCase();
+  if (normalized.startsWith("functions.")) normalized = normalized.slice("functions.".length);
+  if (normalized.startsWith("mcp__reamerx__")) {
+    normalized = normalized.slice("mcp__reamerx__".length);
+  }
+  if (normalized.startsWith("reamerx.")) {
+    normalized = `reamerx_${normalized.slice("reamerx.".length)}`;
+  }
+  return normalized;
+}
+
+export function isReamerxExploratoryTool(toolName: string): boolean {
+  return REAMERX_EXPLORATORY_TOOLS.has(normalizeReamerxToolName(toolName));
+}
+
+export function isReamerxTerminalTool(toolName: string): boolean {
+  return REAMERX_TERMINAL_TOOLS.has(normalizeReamerxToolName(toolName));
+}
 
 export const INTERNAL_TOOL_NAMES = new Set([
   "list_context_chunks",
@@ -121,7 +192,7 @@ export function classifyKind(
   text: string,
   params?: Record<string, unknown>,
 ): ChunkKind {
-  const normalized = toolName.toLowerCase();
+  const normalized = normalizeReamerxToolName(toolName);
   const mapped =
     REAMER_TOOL_KINDS[normalized] ?? FLOW_TOOL_KINDS[normalized] ?? GENERIC_TOOL_KINDS[normalized];
   if (mapped && mapped !== "shell") return mapped;
