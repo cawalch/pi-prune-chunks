@@ -103,6 +103,8 @@ and recommended prune candidates.
 - `/prune-restore pc_0001_a1b2c3` restores one or more pruned chunks.
 - `/prune-report --output prune-report.md` writes a Markdown telemetry report
   with token savings, restore hit rate, tombstone overhead, and policy metrics.
+- `/prune-profile` shows available profiles; `/prune-profile cloud-200k` switches
+  the live session profile; `/prune-profile reset` returns to settings/default.
 - `/prune-status` reports context pressure and whether a continuation manifest
   has been prepared for Pi compaction/resume.
 
@@ -161,7 +163,7 @@ Pi may provide extension config under `pruneChunks`:
 }
 ```
 
-Profiles apply named defaults before explicit config overrides. Available profiles are `local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`, `privacy-max`, `research-heavy`, `coding-heavy`, and `debug-failures`. For example, `"profile": "local-32k"` lowers prune thresholds and compacts tombstones earlier, while `"profile": "cloud-1m"` preserves more recent evidence and prunes mostly for latency/noise. Any explicit field such as `autoPrune.targetPercent` overrides the selected profile.
+Profiles apply named defaults before explicit config overrides. Available profiles are `local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`, `privacy-max`, `research-heavy`, `coding-heavy`, and `debug-failures`. For example, `"profile": "local-32k"` lowers prune thresholds and compacts tombstones earlier, while `"profile": "cloud-1m"` preserves more recent evidence and prunes mostly for latency/noise. Any explicit field such as `autoPrune.targetPercent` overrides the selected profile. Use `/prune-profile <name>` to switch profiles for the current live session without reloading; the live override is stored in extension state for the session lineage.
 
 Raw tool output is not persisted to disk by default. For backward-compatible config, `"diskCache": true` is accepted and expands to the default durable-cache settings.
 

@@ -74,6 +74,17 @@ type RawPruneChunksConfig = Partial<
   };
 };
 
+export const POLICY_PROFILE_NAMES: PolicyProfileName[] = [
+  "local-32k",
+  "local-64k",
+  "cloud-200k",
+  "cloud-1m",
+  "privacy-max",
+  "research-heavy",
+  "coding-heavy",
+  "debug-failures",
+];
+
 export const POLICY_PROFILES: Record<
   PolicyProfileName,
   Partial<Omit<PruneChunksConfig, "profile">>
@@ -293,17 +304,12 @@ function normalizeProfile(input: unknown): PolicyProfileName {
   return isProfile(input) ? input : DEFAULT_CONFIG.profile;
 }
 
+export function isPolicyProfile(input: unknown): input is PolicyProfileName {
+  return typeof input === "string" && POLICY_PROFILE_NAMES.includes(input as PolicyProfileName);
+}
+
 function isProfile(input: unknown): input is PolicyProfileName {
-  return (
-    input === "local-32k" ||
-    input === "local-64k" ||
-    input === "cloud-200k" ||
-    input === "cloud-1m" ||
-    input === "privacy-max" ||
-    input === "research-heavy" ||
-    input === "coding-heavy" ||
-    input === "debug-failures"
-  );
+  return isPolicyProfile(input);
 }
 
 function normalizePolicy(

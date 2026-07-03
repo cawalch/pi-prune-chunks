@@ -312,4 +312,5 @@ export type PersistedPruneChunksState = {
   audit: ChunkAuditEvent[];
   telemetry?: ContextTelemetryEvent[];
   continuationManifest?: ContinuationManifest;
+  activeProfile?: PolicyProfileName;
 };

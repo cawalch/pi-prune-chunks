@@ -7,7 +7,7 @@ import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { collectToolResult } from "./src/collector";
-import { mergeConfig } from "./src/config";
+import { isPolicyProfile, mergeConfig, POLICY_PROFILE_NAMES } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
 import { CompositeChunkContentCache, DiskChunkContentCache } from "./src/diskCache";
 import {
@@ -45,6 +45,7 @@ import type {
   ContextUsage,
   ContinuationManifest,
   PersistedPruneChunksState,
+  PolicyProfileName,
   PreserveContext,
   PruneChunksConfig,
 } from "./src/types";
@@ -61,12 +62,14 @@ export default function (pi: ExtensionAPI) {
     const state = registry.persistenceState();
     state.telemetry = telemetry.persistenceState();
     state.continuationManifest = continuationManifest;
+    state.activeProfile = config.profile;
     pi.appendEntry(STATE_TYPE, { state });
   }
 
   pi.on("session_start", async (_event, ctx) => {
     const state = latestPersistedState(ctx?.sessionManager?.getEntries?.() ?? []);
     if (state) {
+      applyProfile(config, state.activeProfile);
       registry.restorePersistence(state);
       telemetry.restorePersistence(state.telemetry);
       continuationManifest = state.continuationManifest;
@@ -376,6 +379,35 @@ function registerCommands(
     },
   });
 
+  pi.registerCommand("prune-profile", {
+    description: "Show or switch the active prune policy profile for this live session",
+    async run(args, ctx) {
+      const parsed = parseCommandArgs(args);
+      const requested = idsFromCommandArgs(parsed)[0];
+      if (!requested || requested === "show" || requested === "list") {
+        notify(ctx, renderProfileStatus(config));
+        return;
+      }
+      if (requested === "reset") {
+        const settingsConfig = resolveConfig(pi);
+        applyConfig(config, settingsConfig);
+        persistState();
+        notify(ctx, `Prune profile reset to settings/default: ${config.profile}`);
+        return;
+      }
+      if (!isPolicyProfile(requested)) {
+        notify(
+          ctx,
+          `Unknown prune profile "${requested}". Available profiles: ${POLICY_PROFILE_NAMES.join(", ")}`,
+        );
+        return;
+      }
+      applyProfile(config, requested);
+      persistState();
+      notify(ctx, `Prune profile switched to ${config.profile} for this live session.`);
+    },
+  });
+
   pi.registerCommand("prune-largest", {
     description: "Show largest unpruned chunks",
     async run(args, ctx) {
@@ -485,6 +517,26 @@ function resolveConfig(pi: ExtensionAPI): PruneChunksConfig {
     (pi as unknown as { settings?: { pruneChunks?: Partial<PruneChunksConfig> } }).settings
       ?.pruneChunks;
   return mergeConfig(raw);
+}
+
+function applyProfile(config: PruneChunksConfig, profile: PolicyProfileName | undefined): void {
+  if (!profile) return;
+  applyConfig(config, mergeConfig({ ...config, profile }));
+}
+
+function applyConfig(target: PruneChunksConfig, next: PruneChunksConfig): void {
+  Object.assign(target, next);
+}
+
+function renderProfileStatus(config: PruneChunksConfig): string {
+  return [
+    `Active prune profile: ${config.profile}`,
+    `Policy: ${config.autoPrune.policy}; model profile: ${config.autoPrune.modelProfile}`,
+    `Auto-prune: start=${config.autoPrune.startAtPercent}% target=${config.autoPrune.targetPercent}% maxChunks=${config.autoPrune.maxChunksPerPass}`,
+    `Tombstones: summary=${config.tombstones.includeSummary ? "on" : "off"} maxSummary=${config.tombstones.maxSummaryChars} compact=${config.tombstones.compactAtPercent}% coalesce=${config.tombstones.coalesceAtPercent}%`,
+    `Available profiles: ${POLICY_PROFILE_NAMES.join(", ")}`,
+    `Switch with: /prune-profile <profile>; reset with: /prune-profile reset`,
+  ].join("\n");
 }
 
 function latestPersistedState(entries: unknown[]): PersistedPruneChunksState | undefined {
