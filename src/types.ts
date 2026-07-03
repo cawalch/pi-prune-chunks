@@ -53,6 +53,15 @@ export interface ChunkDecisionCard {
   generatedBy: "heuristic" | "model";
 }
 
+export type ChunkScopeKind = "main" | "subagent" | "chain";
+
+export interface ChunkScope {
+  scope: ChunkScopeKind;
+  runId?: string;
+  agentName?: string;
+  parentRunId?: string;
+}
+
 export interface ChunkPart {
   index: number;
   label: string;
@@ -65,6 +74,7 @@ export interface ContextChunk {
   id: string;
   parentId?: string;
   part?: ChunkPart;
+  scope?: ChunkScope;
   toolName: string;
   label: string;
   kind: ChunkKind;
@@ -217,6 +227,7 @@ export interface CollectedChunk {
   summary?: string;
   decisionCard?: ChunkDecisionCard;
   source?: ChunkSource;
+  scope?: ChunkScope;
 }
 
 export type ListChunksOptions = {
@@ -227,6 +238,7 @@ export type ListChunksOptions = {
   minTokens?: number;
   limit?: number;
   sortBy?: "tokens" | "age" | "recent" | "risk";
+  scope?: ChunkScopeKind;
 };
 
 export type ChunkListOutput = {
@@ -240,6 +252,7 @@ export type ChunkListOutput = {
     id: string;
     parentId?: string;
     part?: ChunkPart;
+    scope?: ChunkScope;
     label: string;
     toolName: string;
     kind: ChunkKind;

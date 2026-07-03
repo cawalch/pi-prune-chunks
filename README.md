@@ -44,8 +44,8 @@ Saved transcript entries are not rewritten or deleted. Very large results may al
 ### `list_context_chunks`
 
 Lists tracked chunks with kind, risk, token estimate, prune/pin state, restore
-availability, decision-card preview, source metadata, and child part markers for
-partial-prune candidates.
+availability, decision-card preview, source metadata, child part markers for
+partial-prune candidates, and optional `main`/`subagent`/`chain` scope metadata.
 
 ```ts
 {
@@ -96,6 +96,7 @@ and recommended prune candidates.
 
 - `/prune-status` shows pressure and policy state.
 - `/prune-largest --limit 20 --kind search` lists largest active chunks.
+- `/prune-largest --scope subagent` focuses on child-agent context.
 - `/prune-suggest --limit 10` lists safe candidates without pruning.
 - `/prune-now --target 45000 --dry-run` previews safe immediate pruning.
 - `/prune-now` prunes up to the configured max safe candidates.
@@ -203,6 +204,11 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
   then exposes a raw-output-free manifest of active IDs, pruned restore hints,
   failures/tests, and recent restores through `context_pressure` and
   `/prune-status`.
+- Subagent-aware isolation: when Pi provides run/agent metadata, chunks are tagged
+  as `main`, `subagent`, or `chain`. `list_context_chunks` and `/prune-largest`
+  can filter by scope, and adaptive scoring prioritizes child exploratory output
+  after a child manifest/final answer has been captured while keeping IDs
+  restorable from the parent.
 - Scope boundary: this extension prunes tracked tool-result chunks, not system
   prompts or ordinary conversation history. If non-chunk overhead dominates,
   conversation-level compression is a separate mechanism.
