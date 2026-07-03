@@ -1,7 +1,8 @@
 # Auto-prune Policy
 
-Auto-prune is enabled by default with adaptive deterministic policy thresholds:
+Auto-prune is enabled by default with the `coding-heavy` named profile and adaptive deterministic policy thresholds:
 
+- profile `coding-heavy`
 - policy `adaptive-v1`
 - model profile `auto`
 - start at 70 percent context usage
@@ -91,6 +92,11 @@ score penalty after that window expires.
 Pressure reports include the active policy, model profile, pressure band,
 candidate score, confidence, blocked reason, and deltas since the last pressure
 check so the agent can see why a chunk would or would not be pruned.
+
+Named profiles tune these thresholds for common workloads and context windows:
+`local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`, `privacy-max`,
+`research-heavy`, `coding-heavy`, and `debug-failures`. Profiles are only
+presets: explicit user config is merged after the profile and takes precedence.
 
 `autoPrune.policy: "heuristic-v1"` remains available for sessions that need the
 previous conservative compatibility behavior.

@@ -16,7 +16,17 @@ export type RestoreMode = "memory" | "disk_cache" | "source_rehydrate" | "unavai
 
 export type AutoPrunePolicyMode = "heuristic-v1" | "adaptive-v1";
 
-export type ModelProfile = "auto" | "local-32k" | "cloud-1m";
+export type ModelProfile = "auto" | "local-32k" | "local-64k" | "cloud-200k" | "cloud-1m";
+
+export type PolicyProfileName =
+  | "local-32k"
+  | "local-64k"
+  | "cloud-200k"
+  | "cloud-1m"
+  | "privacy-max"
+  | "research-heavy"
+  | "coding-heavy"
+  | "debug-failures";
 
 export interface DiskCacheConfig {
   enabled: boolean;
@@ -174,6 +184,7 @@ export interface ContextUsage {
 }
 
 export type PruneChunksConfig = {
+  profile: PolicyProfileName;
   enabled: boolean;
   trackTools: string[];
   track: {

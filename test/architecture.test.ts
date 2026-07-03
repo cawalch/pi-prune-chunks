@@ -262,6 +262,33 @@ describe("collector", () => {
 
     assert.equal(chunk, null);
   });
+
+  test("applies named policy profiles before explicit overrides", () => {
+    const local = mergeConfig({ profile: "local-32k" });
+    assert.equal(local.profile, "local-32k");
+    assert.equal(local.autoPrune.modelProfile, "local-32k");
+    assert.equal(local.autoPrune.startAtPercent, 55);
+    assert.equal(local.tombstones.compactAtPercent, 80);
+
+    const cloud = mergeConfig({ profile: "cloud-1m" });
+    assert.equal(cloud.autoPrune.modelProfile, "cloud-1m");
+    assert.equal(cloud.autoPrune.preserveRecentChunks, 12);
+    assert.equal(cloud.tombstones.maxSummaryChars, 280);
+
+    const privacy = mergeConfig({ profile: "privacy-max" });
+    assert.equal(privacy.tombstones.includeSummary, false);
+    assert.equal(privacy.restore.diskCache.enabled, false);
+
+    const override = mergeConfig({
+      profile: "local-32k",
+      autoPrune: { targetPercent: 55, preserveRecentChunks: 9 },
+      tombstones: { maxSummaryChars: 200 },
+    });
+    assert.equal(override.autoPrune.startAtPercent, 55);
+    assert.equal(override.autoPrune.targetPercent, 55);
+    assert.equal(override.autoPrune.preserveRecentChunks, 9);
+    assert.equal(override.tombstones.maxSummaryChars, 200);
+  });
 });
 
 describe("registry and tombstones", () => {
@@ -985,6 +1012,7 @@ describe("pruner and restorer", () => {
       config,
     );
     assert.equal(pressure.autoPrune.currentPercent, 75);
+    assert.equal(pressure.autoPrune.profile, "coding-heavy");
     assert.equal(pressure.recommendedCandidates.length, 1);
   });
 
@@ -1085,7 +1113,7 @@ describe("pruner and restorer", () => {
         localRegistry,
         { tokens: 8_000, contextWindow: 10_000, percent: 80 },
         localConfig,
-      ).includes("policy=adaptive-v1"),
+      ).includes("profile=coding-heavy policy=adaptive-v1"),
     );
   });
 
