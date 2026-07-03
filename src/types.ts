@@ -102,6 +102,33 @@ export type TelemetryEventType =
   | "tombstone"
   | "coalesce";
 
+export interface ContinuationManifestEntry {
+  id: string;
+  label: string;
+  kind: ChunkKind;
+  risk: ChunkRisk;
+  tokenEstimate: number;
+  status: "active" | "pruned";
+  card?: string;
+  restoreHint?: string;
+  sourceAnchors?: string[];
+}
+
+export interface ContinuationManifest {
+  id: string;
+  generatedAt: number;
+  reason: string;
+  pressurePercent: number | null;
+  policy: AutoPrunePolicyMode;
+  modelProfile: ModelProfile;
+  modifiedPaths: string[];
+  pinnedChunkIds: string[];
+  active: ContinuationManifestEntry[];
+  prunedHighValue: ContinuationManifestEntry[];
+  unresolvedFailures: ContinuationManifestEntry[];
+  recentRestores: ContinuationManifestEntry[];
+}
+
 export interface ContextTelemetryEvent {
   id: string;
   type: TelemetryEventType;
@@ -260,4 +287,5 @@ export type PersistedPruneChunksState = {
   chunks: ContextChunk[];
   audit: ChunkAuditEvent[];
   telemetry?: ContextTelemetryEvent[];
+  continuationManifest?: ContinuationManifest;
 };

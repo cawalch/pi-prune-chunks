@@ -11,6 +11,11 @@ import { mergeConfig } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
 import { CompositeChunkContentCache, DiskChunkContentCache } from "./src/diskCache";
 import {
+  isCompactionImminent,
+  prepareContinuationManifest,
+  renderContinuationManifestPreview,
+} from "./src/manifest";
+import {
   autoPrune,
   contextPercent,
   pruneReamerxExploratoryAfterTerminal,
@@ -36,6 +41,7 @@ import type {
   ChunkKind,
   ContentBlock,
   ContextUsage,
+  ContinuationManifest,
   PersistedPruneChunksState,
   PreserveContext,
   PruneChunksConfig,
@@ -47,10 +53,12 @@ export default function (pi: ExtensionAPI) {
   const config = resolveConfig(pi);
   const registry = new ChunkRegistry(createContentCache(config));
   const telemetry = new TelemetryRecorder();
+  let continuationManifest: ContinuationManifest | undefined;
 
   function persistState() {
     const state = registry.persistenceState();
     state.telemetry = telemetry.persistenceState();
+    state.continuationManifest = continuationManifest;
     pi.appendEntry(STATE_TYPE, { state });
   }
 
@@ -59,12 +67,14 @@ export default function (pi: ExtensionAPI) {
     if (state) {
       registry.restorePersistence(state);
       telemetry.restorePersistence(state.telemetry);
+      continuationManifest = state.continuationManifest;
     }
   });
 
   pi.on("session_shutdown", async () => {
     registry.reset();
     telemetry.restorePersistence([]);
+    continuationManifest = undefined;
   });
 
   pi.on("tool_result", async (event) => {
@@ -98,6 +108,9 @@ export default function (pi: ExtensionAPI) {
   pi.on("context", async (event, ctx) => {
     const usage = getUsage(ctx);
     const preserve = preserveContext(event.messages ?? [], ctx);
+    const continuationPrep = prepareContinuationManifest(registry, usage, config, preserve);
+    if (continuationPrep.manifest) continuationManifest = continuationPrep.manifest;
+    if (continuationPrep.manifest || continuationPrep.pinnedIds.length > 0) persistState();
     const pruneResult = autoPrune(registry, usage, config, { preserve });
     telemetry.recordActionResults("auto_prune", pruneResult.pruned, pruneResult.reason);
     if (pruneResult.pruned.some((result) => result.status === "pruned")) {
@@ -302,16 +315,30 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const usage = getUsage(ctx);
-      const pressure = renderPressure(registry, usage, config, preserveContext([], ctx));
+      const preserve = preserveContext([], ctx);
+      const prep = prepareContinuationManifest(registry, usage, config, preserve);
+      if (prep.manifest) continuationManifest = prep.manifest;
+      if (prep.manifest || prep.pinnedIds.length > 0) persistState();
+      const pressure = renderPressure(registry, usage, config, preserve, continuationManifest);
       const delta = telemetry.pressureDelta(registry.summary());
       return {
         content: [{ type: "text", text: `${pressure}\n\n${delta}` }],
-        details: { pressure, delta },
+        details: { pressure, delta, continuationManifest },
       };
     },
   });
 
-  registerCommands(pi, registry, config, telemetry, persistState);
+  registerCommands(
+    pi,
+    registry,
+    config,
+    telemetry,
+    () => continuationManifest,
+    (manifest) => {
+      continuationManifest = manifest;
+    },
+    persistState,
+  );
 }
 
 function registerCommands(
@@ -319,12 +346,26 @@ function registerCommands(
   registry: ChunkRegistry,
   config: PruneChunksConfig,
   telemetry: TelemetryRecorder,
+  getContinuationManifest: () => ContinuationManifest | undefined,
+  setContinuationManifest: (manifest: ContinuationManifest | undefined) => void,
   persistState: () => void,
 ): void {
   pi.registerCommand("prune-status", {
     description: "Show context chunk tracking and pruning status",
     async run(_args, ctx) {
-      notify(ctx, renderPressure(registry, getUsage(ctx), config, preserveContext([], ctx)));
+      const usage = getUsage(ctx);
+      const preserve = preserveContext([], ctx);
+      const prep = prepareContinuationManifest(registry, usage, config, preserve);
+      if (prep.manifest) setContinuationManifest(prep.manifest);
+      if (prep.manifest || prep.pinnedIds.length > 0) persistState();
+      const manifest = getContinuationManifest();
+      const pressure = renderPressure(registry, usage, config, preserve, manifest);
+      notify(
+        ctx,
+        isCompactionImminent(usage, config) || manifest
+          ? pressure
+          : `${pressure}\n\n${renderContinuationManifestPreview(undefined)}`,
+      );
     },
   });
 

@@ -1,4 +1,5 @@
 import { compactDecisionCard } from "./cards";
+import { renderContinuationManifestPreview } from "./manifest";
 import type { PruneCandidate } from "./pruner";
 import { contextPercent, pressureSummary } from "./pruner";
 import type { ChunkRegistry } from "./registry";
@@ -6,6 +7,7 @@ import type {
   ChunkActionResult,
   ChunkListOutput,
   ContextUsage,
+  ContinuationManifest,
   PreserveContext,
   PruneChunksConfig,
 } from "./types";
@@ -73,6 +75,7 @@ export function renderPressure(
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
   preserve?: PreserveContext,
+  continuationManifest?: ContinuationManifest,
 ): string {
   const pressure = pressureSummary(registry, usage, config, preserve);
   const pct = pressure.autoPrune.currentPercent;
@@ -114,6 +117,10 @@ export function renderPressure(
         `  ${candidate.id}: ${candidate.kind}/${candidate.risk} ~${candidate.tokenEstimate}t ${candidate.label}; ${candidate.reason}`,
       );
     }
+  }
+
+  if (continuationManifest) {
+    lines.push("", renderContinuationManifestPreview(continuationManifest));
   }
 
   return lines.join("\n");

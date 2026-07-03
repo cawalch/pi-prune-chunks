@@ -11,6 +11,9 @@
    previews under the configured summary budget. For partial child chunks, it
    replaces only the child's source line range with a tombstone and keeps the
    parent prefix/failure lines visible.
+5. Continuation manifest: when provider pressure reaches the compact tombstone
+   band, pins carry-forward failures/diffs/modified-path chunks and persists a
+   compact ID/card/restore-hint manifest to help Pi compaction and resume.
 5. Restorer: restores from memory first, then optional durable disk cache, then
    source file ranges when available.
 
