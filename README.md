@@ -102,6 +102,8 @@ and recommended prune candidates.
 - `/prune-restore pc_0001_a1b2c3` restores one or more pruned chunks.
 - `/prune-report --output prune-report.md` writes a Markdown telemetry report
   with token savings, restore hit rate, tombstone overhead, and policy metrics.
+- `/prune-status` reports context pressure and whether a continuation manifest
+  has been prepared for Pi compaction/resume.
 
 ## Configuration
 
@@ -196,6 +198,11 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
 - Telemetry reports: `context_report` or `/prune-report` summarize collected,
   pruned, restored, coalesced, and tombstoned tokens without storing raw tool
   output in telemetry.
+- Continuation manifest: near the compact tombstone pressure band, the extension
+  pins carry-forward evidence such as failures, diffs, and modified-path chunks,
+  then exposes a raw-output-free manifest of active IDs, pruned restore hints,
+  failures/tests, and recent restores through `context_pressure` and
+  `/prune-status`.
 - Scope boundary: this extension prunes tracked tool-result chunks, not system
   prompts or ordinary conversation history. If non-chunk overhead dominates,
   conversation-level compression is a separate mechanism.

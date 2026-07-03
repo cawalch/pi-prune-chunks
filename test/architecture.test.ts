@@ -1434,6 +1434,73 @@ describe("extension integration", () => {
     assert.ok(!report.includes("src/report.ts:1: hit"));
   });
 
+  test("high pressure prepares a continuation manifest and pins carry-forward chunks", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.handlers.tool_result?.({
+      toolCallId: "fail_tool",
+      toolName: "bash",
+      content: textBlock(
+        "npm test\nFAIL test/thing.test.ts\nAssertionError: expected true\n".repeat(160),
+      ),
+      params: { command: "npm test" },
+    });
+    await pi.handlers.tool_result?.({
+      toolCallId: "diff_tool",
+      toolName: "bash",
+      content: textBlock(
+        "diff --git a/src/work.ts b/src/work.ts\n@@ -1 +1 @@\n-old\n+new\n".repeat(80),
+      ),
+    });
+    await pi.handlers.tool_result?.({
+      toolCallId: "old_fail_tool",
+      toolName: "bash",
+      content: textBlock(
+        "npm test old\nFAIL test/old.test.ts\nAssertionError: old failure\n".repeat(160),
+      ),
+      params: { command: "npm test old" },
+    });
+    const list = await pi.tools.list_context_chunks.execute("list", { sortBy: "tokens" });
+    const oldFailureId = list.details.chunks.find((chunk: { label: string }) =>
+      chunk.label.includes("npm test old"),
+    )?.id;
+    assert.ok(oldFailureId);
+    await pi.tools.prune_chunks.execute("prune", {
+      ids: [oldFailureId],
+      reason: "old evidence",
+    });
+
+    const pressure = await pi.tools.context_pressure.execute("pressure", {}, undefined, undefined, {
+      modifiedFiles: ["src/work.ts"],
+      getContextUsage: () => ({ tokens: 9_200, contextWindow: 10_000, percent: 92 }),
+    });
+
+    assert.ok(pressure.content[0].text.includes("Continuation manifest:"));
+    assert.ok(pressure.content[0].text.includes("pinned for carry-forward:"));
+    assert.ok(pressure.content[0].text.includes("unresolved failures/tests:"));
+    assert.ok(pressure.content[0].text.includes("restorable pruned evidence:"));
+    assert.ok(pi.entries.at(-1)?.data.state.continuationManifest);
+
+    const pinned = await pi.tools.list_context_chunks.execute("list", { pinned: true, limit: 10 });
+    assert.ok(
+      pinned.details.chunks.some((chunk: { label: string }) => chunk.label.includes("npm test")),
+    );
+    assert.ok(pinned.details.chunks.some((chunk: { kind: string }) => chunk.kind === "diff"));
+  });
+
+  test("prune-status reports when no continuation manifest is prepared", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.commands["prune-status"].run("", {
+      ui: pi.ui,
+      getContextUsage: () => ({ tokens: 1_000, contextWindow: 10_000, percent: 10 }),
+    });
+
+    assert.ok(pi.ui.notices.at(-1)?.includes("Continuation manifest: none prepared."));
+  });
+
   test("prune-restore command restores pruned chunks", async () => {
     const pi = createMockPi(testConfig());
     extension(pi as never);
