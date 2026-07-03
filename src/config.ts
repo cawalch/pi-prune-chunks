@@ -1,4 +1,11 @@
-import type { PruneChunksConfig } from "./types";
+import type { DiskCacheConfig, PruneChunksConfig } from "./types";
+
+export const DEFAULT_DISK_CACHE_CONFIG: DiskCacheConfig = {
+  enabled: false,
+  maxBytes: 250 * 1024 * 1024,
+  maxAgeDays: 14,
+  maxBlobBytes: 25 * 1024 * 1024,
+};
 
 export const DEFAULT_CONFIG: PruneChunksConfig = {
   enabled: true,
@@ -34,13 +41,20 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
   },
   restore: {
     memory: true,
-    diskCache: false,
+    diskCache: DEFAULT_DISK_CACHE_CONFIG,
     sourceRehydrate: true,
   },
   debug: false,
 };
 
-export function mergeConfig(input?: Partial<PruneChunksConfig> | null): PruneChunksConfig {
+type RawDiskCacheConfig = boolean | Partial<DiskCacheConfig> | undefined;
+type RawPruneChunksConfig = Partial<Omit<PruneChunksConfig, "restore">> & {
+  restore?: Partial<Omit<PruneChunksConfig["restore"], "diskCache">> & {
+    diskCache?: RawDiskCacheConfig;
+  };
+};
+
+export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksConfig {
   if (!input) return structuredClone(DEFAULT_CONFIG);
 
   return {
@@ -95,9 +109,23 @@ export function mergeConfig(input?: Partial<PruneChunksConfig> | null): PruneChu
     },
     restore: {
       memory: input.restore?.memory ?? DEFAULT_CONFIG.restore.memory,
-      diskCache: input.restore?.diskCache ?? DEFAULT_CONFIG.restore.diskCache,
+      diskCache: mergeDiskCacheConfig(input.restore?.diskCache),
       sourceRehydrate: input.restore?.sourceRehydrate ?? DEFAULT_CONFIG.restore.sourceRehydrate,
     },
     debug: input.debug ?? DEFAULT_CONFIG.debug,
+  };
+}
+
+function mergeDiskCacheConfig(input: RawDiskCacheConfig): DiskCacheConfig {
+  if (typeof input === "boolean") {
+    return { ...DEFAULT_DISK_CACHE_CONFIG, enabled: input };
+  }
+  if (!input) return { ...DEFAULT_DISK_CACHE_CONFIG };
+  return {
+    enabled: input.enabled ?? DEFAULT_DISK_CACHE_CONFIG.enabled,
+    directory: input.directory ?? DEFAULT_DISK_CACHE_CONFIG.directory,
+    maxBytes: input.maxBytes ?? DEFAULT_DISK_CACHE_CONFIG.maxBytes,
+    maxAgeDays: input.maxAgeDays ?? DEFAULT_DISK_CACHE_CONFIG.maxAgeDays,
+    maxBlobBytes: input.maxBlobBytes ?? DEFAULT_DISK_CACHE_CONFIG.maxBlobBytes,
   };
 }

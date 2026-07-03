@@ -1,6 +1,7 @@
 export * from "./collector";
 export * from "./config";
 export * from "./contextGuards";
+export * from "./diskCache";
 export * from "./pruner";
 export * from "./registry";
 export * from "./render";

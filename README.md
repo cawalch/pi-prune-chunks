@@ -138,7 +138,13 @@ Pi may provide extension config under `pruneChunks`:
     },
     "restore": {
       "memory": true,
-      "diskCache": false,
+      "diskCache": {
+        "enabled": false,
+        "directory": "~/.pi/prune-chunks/cache",
+        "maxBytes": 262144000,
+        "maxAgeDays": 14,
+        "maxBlobBytes": 26214400
+      },
       "sourceRehydrate": true
     },
     "debug": false
@@ -146,13 +152,14 @@ Pi may provide extension config under `pruneChunks`:
 }
 ```
 
-Raw tool output is not persisted to disk by default.
+Raw tool output is not persisted to disk by default. For backward-compatible config, `"diskCache": true` is accepted and expands to the default durable-cache settings.
 
 ## Safety Model
 
 - Non-destructive: provider context is rewritten, saved transcript history is not.
-- Restorable: same-session memory restores exact content; source rehydrate can
-  recover file ranges when metadata is available.
+- Restorable: same-session memory restores exact content; optional durable disk
+  cache can restore non-file chunks after restart; source rehydrate can recover
+  file ranges when metadata is available.
 - Conservative auto-prune: pinned, high-risk, the most recent chunks, recently
   restored chunks, and latest-assistant-referenced chunks are preserved. Created
   age and token floors relax once usage is materially above the start threshold.

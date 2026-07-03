@@ -3,6 +3,7 @@
 Restore can fail when:
 
 - a chunk was loaded from metadata after process restart and has no memory cache
+- durable disk cache is disabled, missing, expired, size-trimmed, or corrupted
 - source metadata lacks a path or line range
 - the source file no longer exists
 - the source file changed after the chunk was tracked
@@ -45,4 +46,7 @@ Raw tool output is not persisted by default. This protects privacy but means
 same-session memory restore is the only exact restore path unless source
 rehydration metadata is available. Chunks without source path and line-range
 metadata, such as repo maps or directory overviews, are intentionally
-unavailable after memory is gone.
+unavailable after memory is gone. Enabling `restore.diskCache` stores compressed,
+content-addressed blobs so these non-file chunks can be restored after restart;
+if the cache is later removed or trimmed, restore falls back to source rehydrate
+when possible and otherwise reports the unavailable reason.

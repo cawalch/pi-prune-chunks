@@ -12,6 +12,7 @@ import {
   isReamerxTerminalTool,
 } from "../src/collector";
 import { mergeConfig } from "../src/config";
+import { CompositeChunkContentCache, DiskChunkContentCache } from "../src/diskCache";
 import {
   autoPrune,
   pressureSummary,
@@ -19,7 +20,7 @@ import {
   pruneSupersededAfterCollect,
   suggestPruneCandidates,
 } from "../src/pruner";
-import { ChunkRegistry } from "../src/registry";
+import { ChunkRegistry, MemoryChunkContentCache } from "../src/registry";
 import { renderChunkList, renderPressure } from "../src/render";
 import { restoreChunks } from "../src/restorer";
 import { applyPrunedTombstones, tombstoneFor } from "../src/tombstones";
@@ -253,9 +254,11 @@ describe("registry and tombstones", () => {
     assert.equal(listed.chunks[0].restoreMode, "unavailable");
     assert.equal(
       listed.chunks[0].restoreUnavailableReason,
-      "no memory content or source path metadata",
+      "no memory content, disk cache, or source path metadata",
     );
-    assert.ok(rendered.includes("unavailable: no memory content or source path metadata"));
+    assert.ok(
+      rendered.includes("unavailable: no memory content, disk cache, or source path metadata"),
+    );
   });
 
   test("renders compact tombstones and does not mutate original messages", () => {
@@ -944,6 +947,60 @@ describe("pruner and restorer", () => {
     assert.equal(sourceResult[0].restoreMode, "source_rehydrate");
   });
 
+  test("restores non-source chunks from durable disk cache after metadata reload", async () => {
+    const cacheDir = await mkdtemp(path.join(tmpdir(), "pi-prune-cache-"));
+    const config = testConfig({
+      restore: {
+        memory: true,
+        diskCache: {
+          enabled: true,
+          directory: cacheDir,
+          maxBytes: 10_000_000,
+          maxAgeDays: 1,
+          maxBlobBytes: 1_000_000,
+        },
+        sourceRehydrate: true,
+      },
+    });
+    const cache = new CompositeChunkContentCache(
+      new MemoryChunkContentCache(),
+      new DiskChunkContentCache(config.restore.diskCache),
+    );
+    const registry = new ChunkRegistry(cache);
+    const chunk = addChunk(
+      registry,
+      config,
+      "search_1",
+      "web_search",
+      "Answer: useful fact\n".repeat(120),
+    );
+    registry.prune([chunk.id], "manual");
+    const state = registry.persistenceState();
+    registry.reset();
+
+    const resumed = new ChunkRegistry(
+      new CompositeChunkContentCache(
+        new MemoryChunkContentCache(),
+        new DiskChunkContentCache(config.restore.diskCache),
+      ),
+    );
+    resumed.restorePersistence(state);
+
+    const listed = resumed.list({ pruned: true });
+    assert.equal(listed.chunks[0].restoreMode, "disk_cache");
+    assert.equal(listed.chunks[0].restoreAvailable, true);
+
+    const [result] = await restoreChunks(resumed, [chunk.id], config);
+    assert.equal(result.status, "restored");
+    assert.equal(result.restoreMode, "disk_cache");
+  });
+
+  test("legacy diskCache boolean enables default durable-cache settings", () => {
+    const config = mergeConfig({ restore: { diskCache: true } });
+    assert.equal(config.restore.diskCache.enabled, true);
+    assert.equal(config.restore.diskCache.maxBytes > 0, true);
+  });
+
   test("restore reports specific unavailable reasons", async () => {
     const config = testConfig();
     const registry = new ChunkRegistry();
@@ -957,7 +1014,7 @@ describe("pruner and restorer", () => {
     const [result] = await restoreChunks(resumed, [pathOnly.id], config);
 
     assert.equal(result.status, "unavailable");
-    assert.equal(result.reason, "no memory content or source line range metadata");
+    assert.equal(result.reason, "no memory content, disk cache, or source line range metadata");
   });
 });
 

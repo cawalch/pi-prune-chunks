@@ -4,10 +4,11 @@
 
 1. Collector: turns large text tool results into typed chunk candidates.
 2. Registry: owns `ContextChunk` metadata, stable IDs, pin/prune state, audit
-   events, and same-session content cache.
+   events, and configured content caches.
 3. Pruner: scores safe candidates and applies manual or automatic pruning.
 4. Tombstones: renders compact provider-context replacements.
-5. Restorer: restores from memory first, then source file ranges when available.
+5. Restorer: restores from memory first, then optional durable disk cache, then
+   source file ranges when available.
 
 The extension entry point wires these layers into Pi hooks:
 
@@ -19,7 +20,10 @@ The extension entry point wires these layers into Pi hooks:
   `restore_chunks` tool.
 
 The saved transcript remains the source of truth. Pruning state is metadata over
-that transcript, not a destructive transcript edit.
+that transcript, not a destructive transcript edit. By default raw content stays
+memory-only; setting `restore.diskCache.enabled` (or legacy `restore.diskCache:
+true`) adds a compressed content-addressed blob cache for exact restore after a
+Pi process restart.
 
 The extension only manages tracked tool-result chunks. It reports provider
 tokens outside those chunks, but it does not compress the system prompt or
