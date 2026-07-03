@@ -1,8 +1,8 @@
 # Auto-prune Policy
 
-Auto-prune is enabled by default with conservative `heuristic-v1` thresholds:
+Auto-prune is enabled by default with adaptive deterministic policy thresholds:
 
-- policy `heuristic-v1`
+- policy `adaptive-v1`
 - model profile `auto`
 - start at 70 percent context usage
 - target 55 percent usage
@@ -78,8 +78,8 @@ restorable, or belong to exploratory tool kinds such as search, outline, symbol,
 or flow trace output. Exact duplicate content hashes also receive a boost so
 repeated tool output is pruned before unique context with similar size and risk.
 
-`autoPrune.policy: "adaptive-v1"` keeps the same hard safety blocks but replaces
-candidate ordering with a deterministic policy decision. It adds score reasons
+`autoPrune.policy: "adaptive-v1"` keeps the same hard safety blocks but uses
+candidate ordering from a deterministic policy decision. It adds score reasons
 for restore cost (`memory` < `disk_cache` < `source_rehydrate` < unavailable),
 pressure band, inferred task phase, model profile, source-anchor value, and
 restore history. `modelProfile: "local-32k"` relaxes guards earlier and boosts
@@ -89,8 +89,11 @@ protected for a longer temporary window, and chunks restored before receive a
 score penalty after that window expires.
 
 Pressure reports include the active policy, model profile, pressure band,
-candidate score, confidence, and blocked reason so the agent can see why a chunk
-would or would not be pruned.
+candidate score, confidence, blocked reason, and deltas since the last pressure
+check so the agent can see why a chunk would or would not be pruned.
+
+`autoPrune.policy: "heuristic-v1"` remains available for sessions that need the
+previous conservative compatibility behavior.
 
 The policy is intentionally cheap and metadata-driven. It does not do semantic
 analysis and it does not decide code correctness.

@@ -46,7 +46,7 @@ export function applyPrunedTombstones<
   config: PruneChunksConfig,
   options: TombstoneOptions = {},
   getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
-): { messages: T[]; modified: boolean } {
+): { messages: T[]; modified: boolean; coalesced?: boolean; coalescedCount?: number } {
   if (options.coalesce && !hasPrunedParts(messages, getPrunedParts)) {
     return applyCoalescedPrunedTombstones(messages, getPrunedChunk, config, options);
   }
@@ -83,7 +83,7 @@ function applyCoalescedPrunedTombstones<
   getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
   config: PruneChunksConfig,
   options: TombstoneOptions,
-): { messages: T[]; modified: boolean } {
+): { messages: T[]; modified: boolean; coalesced?: boolean; coalescedCount?: number } {
   const pruned = prunedMessages(messages, getPrunedChunk);
   if (pruned.length <= 1) {
     return applyPrunedTombstones(
@@ -131,7 +131,7 @@ function applyCoalescedPrunedTombstones<
     output.push(message);
   }
 
-  return { messages: output, modified: true };
+  return { messages: output, modified: true, coalesced: true, coalescedCount: coalesced.length };
 }
 
 function hasPrunedParts<T extends { role: string; toolCallId?: string }>(

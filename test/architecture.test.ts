@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { describe } from "node:test";
@@ -23,6 +23,12 @@ import {
 import { ChunkRegistry, MemoryChunkContentCache } from "../src/registry";
 import { renderChunkList, renderPressure } from "../src/render";
 import { restoreChunks } from "../src/restorer";
+import {
+  computeMetrics,
+  renderTelemetryReport,
+  TelemetryRecorder,
+  telemetryTombstoneTokens,
+} from "../src/telemetry";
 import { applyPrunedTombstones, tombstoneFor } from "../src/tombstones";
 import type { ContentBlock, ContextUsage, PruneChunksConfig } from "../src/types";
 
@@ -1155,6 +1161,74 @@ describe("pruner and restorer", () => {
     assert.equal(pressure.blockedCandidates[0].reason, "referenced by active working context");
   });
 
+  test("telemetry records collect, prune, restore, tombstone, and coalesce metrics", async () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const telemetry = new TelemetryRecorder();
+    const chunk = addChunk(
+      registry,
+      config,
+      "telemetry_chunk",
+      "code_search",
+      "src/a.ts:1: hit\n".repeat(220),
+    );
+    telemetry.recordCollected(chunk);
+    const pruneResults = registry.prune([chunk.id], "auto test", "auto_pruned");
+    telemetry.recordActionResults("auto_prune", pruneResults, "auto test");
+    const restoreResults = await restoreChunks(registry, [chunk.id], config);
+    telemetry.recordRestoreResults(restoreResults);
+
+    const messages = [
+      { role: "toolResult", toolCallId: "old_a", content: textBlock("older A") },
+      { role: "toolResult", toolCallId: "old_b", content: textBlock("older B") },
+    ];
+    const oldA = addChunk(registry, config, "old_a", "code_search", "old A\n".repeat(120));
+    const oldB = addChunk(registry, config, "old_b", "code_search", "old B\n".repeat(120));
+    registry.prune([oldA.id, oldB.id], "manual");
+    const tombstones = applyPrunedTombstones(
+      messages,
+      (toolCallId) => registry.prunedForToolCall(toolCallId),
+      config,
+      { coalesce: true },
+    );
+    telemetry.recordTombstones({
+      tombstoneTokens: telemetryTombstoneTokens(tombstones.messages),
+      coalesced: tombstones.coalesced,
+      coalescedCount: tombstones.coalescedCount,
+    });
+
+    const metrics = computeMetrics(telemetry.persistenceState());
+    assert.equal(metrics.collectedChunks, 1);
+    assert.equal(metrics.autoPrunes, 1);
+    assert.equal(metrics.restores, 1);
+    assert.equal(metrics.falsePositiveAutoPrunes, 1);
+    assert.equal(metrics.coalescingEvents, 1);
+    assert.equal(metrics.coalescedChunks, 1);
+    assert.ok(metrics.tombstoneTokens > 0);
+
+    const report = renderTelemetryReport(telemetry.snapshot(registry.summary(), config, null));
+    assert.ok(report.includes("# Prune Chunks Telemetry Report"));
+    assert.ok(report.includes("Raw tool output is not included"));
+  });
+
+  test("telemetry pressure deltas compare successive pressure samples", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const telemetry = new TelemetryRecorder();
+    addChunk(registry, config, "delta_a", "code_search", "src/a.ts:1: hit\n".repeat(120));
+
+    assert.match(telemetry.pressureDelta(registry.summary()), /first pressure sample/);
+    const chunk = addChunk(
+      registry,
+      config,
+      "delta_b",
+      "code_search",
+      "src/b.ts:1: hit\n".repeat(120),
+    );
+    registry.prune([chunk.id], "manual");
+    assert.match(telemetry.pressureDelta(registry.summary()), /active .*t, pruned \+\d+t/);
+  });
+
   test("pressure report explains when target is unreachable from chunks alone", () => {
     const config = testConfig();
     const registry = new ChunkRegistry();
@@ -1277,6 +1351,7 @@ describe("extension integration", () => {
       "restore_chunks",
       "pin_chunks",
       "unpin_chunks",
+      "context_report",
       "context_pressure",
     ]) {
       assert.ok(pi.tools[name], `${name} was not registered`);
@@ -1336,6 +1411,29 @@ describe("extension integration", () => {
     assert.ok(pi.entries.length > 0, "auto-prune should persist metadata");
   });
 
+  test("context report tool and prune-report command expose telemetry without raw output", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.handlers.tool_result?.({
+      toolCallId: "report_tool",
+      toolName: "code_search",
+      content: textBlock("src/report.ts:1: hit\n".repeat(160)),
+    });
+
+    const reportTool = await pi.tools.context_report.execute("report", {}, undefined, undefined, {
+      getContextUsage: () => ({ tokens: 1_000, contextWindow: 10_000, percent: 10 }),
+    });
+    assert.ok(reportTool.content[0].text.includes("# Prune Chunks Telemetry Report"));
+    assert.ok(!reportTool.content[0].text.includes("src/report.ts:1: hit"));
+
+    const cwd = await mkdtemp(path.join(tmpdir(), "pi-prune-report-"));
+    await pi.commands["prune-report"].run("--output report.md", { cwd, ui: pi.ui });
+    const report = await readFile(path.join(cwd, "report.md"), "utf8");
+    assert.ok(report.includes("Collected chunks: 1"));
+    assert.ok(!report.includes("src/report.ts:1: hit"));
+  });
+
   test("prune-restore command restores pruned chunks", async () => {
     const pi = createMockPi(testConfig());
     extension(pi as never);
@@ -1345,6 +1443,7 @@ describe("extension integration", () => {
       "prune-largest",
       "prune-suggest",
       "prune-now",
+      "prune-report",
       "prune-restore",
     ]) {
       assert.ok(pi.commands[name], `${name} was not registered`);

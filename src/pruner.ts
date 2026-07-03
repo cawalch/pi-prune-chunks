@@ -409,8 +409,11 @@ function adaptiveBlockedReason(
   const band = pressureBand(pressurePercent, config);
   const start = config.autoPrune.startAtPercent;
   const preserveMs = config.autoPrune.preserveRecentMinutes * 60 * 1000;
-  const relaxedForPressure = band !== "normal";
-  const minChunkTokens = adaptiveMinChunkTokens(config, band);
+  const relaxedForPressure =
+    pressurePercent != null && pressurePercent >= config.autoPrune.startAtPercent + 5;
+  const minChunkTokens = relaxedForPressure
+    ? Math.min(config.autoPrune.minChunkTokens, config.track.minChunkTokens)
+    : adaptiveMinChunkTokens(config, band);
 
   if (chunk.pruned) return "already pruned";
   if (chunk.pinned) return "pinned";

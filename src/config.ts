@@ -20,7 +20,7 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
   },
   autoPrune: {
     enabled: true,
-    policy: "heuristic-v1",
+    policy: "adaptive-v1",
     modelProfile: "auto",
     startAtPercent: 70,
     targetPercent: 55,

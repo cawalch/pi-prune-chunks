@@ -92,6 +92,28 @@ export type PreserveContext = {
   paths?: Set<string>;
 };
 
+export type TelemetryEventType =
+  | "collect"
+  | "manual_prune"
+  | "auto_prune"
+  | "restore"
+  | "pin"
+  | "unpin"
+  | "tombstone"
+  | "coalesce";
+
+export interface ContextTelemetryEvent {
+  id: string;
+  type: TelemetryEventType;
+  timestamp: number;
+  chunkId?: string;
+  count?: number;
+  tokens?: number;
+  restoreMode?: RestoreMode;
+  status?: string;
+  reason?: string;
+}
+
 export interface ChunkAuditEvent {
   id: string;
   chunkId: string;
@@ -237,4 +259,5 @@ export type PersistedPruneChunksState = {
   version: 1;
   chunks: ContextChunk[];
   audit: ChunkAuditEvent[];
+  telemetry?: ContextTelemetryEvent[];
 };
