@@ -8,6 +8,7 @@ export * from "./pruner";
 export * from "./registry";
 export * from "./render";
 export * from "./restorer";
+export * from "./telemetry";
 export * from "./text";
 export * from "./tombstones";
 export * from "./types";

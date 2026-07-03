@@ -100,6 +100,8 @@ and recommended prune candidates.
 - `/prune-now --target 45000 --dry-run` previews safe immediate pruning.
 - `/prune-now` prunes up to the configured max safe candidates.
 - `/prune-restore pc_0001_a1b2c3` restores one or more pruned chunks.
+- `/prune-report --output prune-report.md` writes a Markdown telemetry report
+  with token savings, restore hit rate, tombstone overhead, and policy metrics.
 
 ## Configuration
 
@@ -113,7 +115,7 @@ Pi may provide extension config under `pruneChunks`:
     "track": { "minChunkTokens": 200 },
     "autoPrune": {
       "enabled": true,
-      "policy": "heuristic-v1",
+      "policy": "adaptive-v1",
       "modelProfile": "auto",
       "startAtPercent": 70,
       "targetPercent": 55,
@@ -186,10 +188,14 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
   evidence (`edit_pack`, `slice`, or `changes`) is acquired, while the terminal
   evidence remains active.
 - Exact duplicate tool outputs are scored higher as prune candidates.
-- Adaptive policy mode: `autoPrune.policy: "adaptive-v1"` adds deterministic
-  restore-cost, pressure-band, task-phase, model-profile, and restore-history
-  scoring. `modelProfile: "local-32k"` prunes more aggressively than
-  `"cloud-1m"`; `"heuristic-v1"` remains the default compatibility mode.
+- Adaptive policy mode is the default: `autoPrune.policy: "adaptive-v1"` adds
+  deterministic restore-cost, pressure-band, task-phase, model-profile, and
+  restore-history scoring. `modelProfile: "local-32k"` prunes more aggressively
+  than `"cloud-1m"`; `"heuristic-v1"` remains available for conservative
+  compatibility.
+- Telemetry reports: `context_report` or `/prune-report` summarize collected,
+  pruned, restored, coalesced, and tombstoned tokens without storing raw tool
+  output in telemetry.
 - Scope boundary: this extension prunes tracked tool-result chunks, not system
   prompts or ordinary conversation history. If non-chunk overhead dominates,
   conversation-level compression is a separate mechanism.

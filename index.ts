@@ -2,6 +2,8 @@
  * Prune Chunks - restorable context garbage collection for bulky tool results.
  */
 
+import { writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { collectToolResult } from "./src/collector";
@@ -24,6 +26,11 @@ import {
   renderPressure,
 } from "./src/render";
 import { restoreChunks } from "./src/restorer";
+import {
+  renderTelemetryReport,
+  TelemetryRecorder,
+  telemetryTombstoneTokens,
+} from "./src/telemetry";
 import { applyPrunedTombstones } from "./src/tombstones";
 import type {
   ChunkKind,
@@ -39,18 +46,25 @@ const STATE_TYPE = "prune-chunks-state-v1";
 export default function (pi: ExtensionAPI) {
   const config = resolveConfig(pi);
   const registry = new ChunkRegistry(createContentCache(config));
+  const telemetry = new TelemetryRecorder();
 
   function persistState() {
-    pi.appendEntry(STATE_TYPE, { state: registry.persistenceState() });
+    const state = registry.persistenceState();
+    state.telemetry = telemetry.persistenceState();
+    pi.appendEntry(STATE_TYPE, { state });
   }
 
   pi.on("session_start", async (_event, ctx) => {
     const state = latestPersistedState(ctx?.sessionManager?.getEntries?.() ?? []);
-    if (state) registry.restorePersistence(state);
+    if (state) {
+      registry.restorePersistence(state);
+      telemetry.restorePersistence(state.telemetry);
+    }
   });
 
   pi.on("session_shutdown", async () => {
     registry.reset();
+    telemetry.restorePersistence([]);
   });
 
   pi.on("tool_result", async (event) => {
@@ -63,8 +77,15 @@ export default function (pi: ExtensionAPI) {
     });
     if (collected) {
       const chunk = registry.addCollected(collected);
+      telemetry.recordCollected(chunk);
       const stalePrune = pruneSupersededAfterCollect(registry, chunk, config);
+      telemetry.recordActionResults("auto_prune", stalePrune.pruned, "superseded on ingest");
       const reamerxPrune = pruneReamerxExploratoryAfterTerminal(registry, chunk, config);
+      telemetry.recordActionResults(
+        "auto_prune",
+        reamerxPrune.pruned,
+        "ReamerX exploratory superseded",
+      );
       if (
         stalePrune.pruned.some((result) => result.status === "pruned") ||
         reamerxPrune.pruned.some((result) => result.status === "pruned")
@@ -78,6 +99,7 @@ export default function (pi: ExtensionAPI) {
     const usage = getUsage(ctx);
     const preserve = preserveContext(event.messages ?? [], ctx);
     const pruneResult = autoPrune(registry, usage, config, { preserve });
+    telemetry.recordActionResults("auto_prune", pruneResult.pruned, pruneResult.reason);
     if (pruneResult.pruned.some((result) => result.status === "pruned")) {
       persistState();
       if (ctx?.hasUI) {
@@ -111,6 +133,11 @@ export default function (pi: ExtensionAPI) {
     const guarded = compactFailedToolValidationMessages(tombstones.messages, config);
 
     if (tombstones.modified || guarded.modified) {
+      telemetry.recordTombstones({
+        tombstoneTokens: telemetryTombstoneTokens(guarded.messages),
+        coalesced: tombstones.coalesced,
+        coalescedCount: tombstones.coalescedCount,
+      });
       return { messages: guarded.messages };
     }
   });
@@ -169,7 +196,9 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       const ids = arrayOfStrings(params.ids);
-      const results = registry.prune(ids, stringOrUndefined(params.reason));
+      const reason = stringOrUndefined(params.reason);
+      const results = registry.prune(ids, reason);
+      telemetry.recordActionResults("manual_prune", results, reason);
       persistState();
       return {
         content: [{ type: "text", text: renderActionResults("pruned", ids, results) }],
@@ -193,6 +222,7 @@ export default function (pi: ExtensionAPI) {
       const results = await restoreChunks(registry, ids, config, {
         cwd: currentWorkingDirectory(ctx),
       });
+      telemetry.recordRestoreResults(results);
       persistState();
       return {
         content: [{ type: "text", text: renderActionResults("restored", ids, results) }],
@@ -215,7 +245,9 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       const ids = arrayOfStrings(params.ids);
-      const results = registry.pin(ids, stringOrUndefined(params.reason));
+      const reason = stringOrUndefined(params.reason);
+      const results = registry.pin(ids, reason);
+      telemetry.recordActionResults("pin", results, reason);
       persistState();
       return {
         content: [{ type: "text", text: renderActionResults("pinned", ids, results) }],
@@ -235,10 +267,29 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       const ids = arrayOfStrings(params.ids);
       const results = registry.unpin(ids);
+      telemetry.recordActionResults("unpin", results);
       persistState();
       return {
         content: [{ type: "text", text: renderActionResults("unpinned", ids, results) }],
         details: { results },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "context_report",
+    label: "Context telemetry report",
+    description:
+      "Return a Markdown telemetry report for tracked/pruned/restored chunks without raw tool output.",
+    promptSnippet: "Generate a context pruning telemetry report",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const usage = getUsage(ctx);
+      const snapshot = telemetry.snapshot(registry.summary(), config, usage);
+      const report = renderTelemetryReport(snapshot);
+      return {
+        content: [{ type: "text", text: report }],
+        details: snapshot,
       };
     },
   });
@@ -252,20 +303,22 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const usage = getUsage(ctx);
       const pressure = renderPressure(registry, usage, config, preserveContext([], ctx));
+      const delta = telemetry.pressureDelta(registry.summary());
       return {
-        content: [{ type: "text", text: pressure }],
-        details: { pressure },
+        content: [{ type: "text", text: `${pressure}\n\n${delta}` }],
+        details: { pressure, delta },
       };
     },
   });
 
-  registerCommands(pi, registry, config, persistState);
+  registerCommands(pi, registry, config, telemetry, persistState);
 }
 
 function registerCommands(
   pi: ExtensionAPI,
   registry: ChunkRegistry,
   config: PruneChunksConfig,
+  telemetry: TelemetryRecorder,
   persistState: () => void,
 ): void {
   pi.registerCommand("prune-status", {
@@ -303,6 +356,20 @@ function registerCommands(
     },
   });
 
+  pi.registerCommand("prune-report", {
+    description: "Write a Markdown telemetry report for pruning activity",
+    async run(args, ctx) {
+      const parsed = parseCommandArgs(args);
+      const output = stringOption(parsed, "--output") ?? "prune-report.md";
+      const report = renderTelemetryReport(
+        telemetry.snapshot(registry.summary(), config, getUsage(ctx)),
+      );
+      const destination = path.resolve(currentWorkingDirectory(ctx) ?? process.cwd(), output);
+      await writeFile(destination, report, "utf8");
+      notify(ctx, `Wrote prune telemetry report to ${output}`);
+    },
+  });
+
   pi.registerCommand("prune-now", {
     description: "Apply safe auto-pruning immediately",
     async run(args, ctx) {
@@ -329,6 +396,7 @@ function registerCommands(
         return;
       }
       const results = registry.prune(ids, "manual /prune-now", "auto_pruned");
+      telemetry.recordActionResults("auto_prune", results, "manual /prune-now");
       persistState();
       notify(ctx, renderActionResults("pruned", ids, results));
     },
@@ -345,6 +413,7 @@ function registerCommands(
       const results = await restoreChunks(registry, ids, config, {
         cwd: currentWorkingDirectory(ctx),
       });
+      telemetry.recordRestoreResults(results);
       persistState();
       notify(ctx, renderActionResults("restored", ids, results));
     },
