@@ -39,6 +39,8 @@ import {
 import { applyPrunedTombstones } from "./src/tombstones";
 import type {
   ChunkKind,
+  ChunkScope,
+  ChunkScopeKind,
   ContentBlock,
   ContextUsage,
   ContinuationManifest,
@@ -83,6 +85,7 @@ export default function (pi: ExtensionAPI) {
       toolName: String(event.toolName),
       content: normalizeContent(event.content),
       params: extractParams(event),
+      scope: extractScope(event),
       config,
     });
     if (collected) {
@@ -173,6 +176,9 @@ export default function (pi: ExtensionAPI) {
       minTokens: Type.Optional(
         Type.Number({ description: "Only show chunks at or above this token estimate" }),
       ),
+      scope: Type.Optional(
+        Type.String({ description: "Filter by scope: main, subagent, or chain" }),
+      ),
       limit: Type.Optional(Type.Number({ description: "Maximum rows to return, default 20" })),
       sortBy: Type.Optional(Type.String({ description: "tokens, age, recent, or risk" })),
     }),
@@ -183,6 +189,7 @@ export default function (pi: ExtensionAPI) {
         pruned: booleanOrUndefined(params.pruned),
         pinned: booleanOrUndefined(params.pinned),
         minTokens: numberOrUndefined(params.minTokens),
+        scope: scopeOrUndefined(params.scope),
         limit: numberOrUndefined(params.limit),
         sortBy: sortOrUndefined(params.sortBy),
       });
@@ -375,7 +382,8 @@ function registerCommands(
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
       const kind = kindOrUndefined(stringOption(parsed, "--kind"));
-      const output = registry.list({ pruned: false, kind, sortBy: "tokens", limit });
+      const scope = scopeOrUndefined(stringOption(parsed, "--scope"));
+      const output = registry.list({ pruned: false, kind, scope, sortBy: "tokens", limit });
       notify(ctx, renderChunkList(output));
     },
   });
@@ -519,6 +527,30 @@ function extractParams(event: Record<string, unknown>): Record<string, unknown> 
   return possible && typeof possible === "object" && !Array.isArray(possible)
     ? (possible as Record<string, unknown>)
     : undefined;
+}
+
+function extractScope(event: Record<string, unknown>): ChunkScope | undefined {
+  const metadata = objectValue(event.metadata) ?? objectValue(event.context) ?? {};
+  const params = extractParams(event) ?? {};
+  const rawScope =
+    stringValue(event.scope) ??
+    stringValue(metadata.scope) ??
+    stringValue(params.scope) ??
+    stringValue(metadata.runScope);
+  const runId =
+    stringValue(event.runId) ?? stringValue(metadata.runId) ?? stringValue(params.runId);
+  const parentRunId =
+    stringValue(event.parentRunId) ??
+    stringValue(metadata.parentRunId) ??
+    stringValue(params.parentRunId);
+  const agentName =
+    stringValue(event.agentName) ??
+    stringValue(metadata.agentName) ??
+    stringValue(params.agentName) ??
+    stringValue(metadata.agent);
+  const scope = normalizeScope(rawScope, { runId, parentRunId, agentName });
+  if (scope === "main" && !runId && !parentRunId && !agentName) return undefined;
+  return { scope, runId, parentRunId, agentName };
 }
 
 function getUsage(ctx: unknown): ContextUsage | null {
@@ -722,4 +754,34 @@ function sortOrUndefined(value: unknown): "tokens" | "age" | "recent" | "risk" |
   const sort = stringOrUndefined(value);
   if (sort === "tokens" || sort === "age" || sort === "recent" || sort === "risk") return sort;
   return undefined;
+}
+
+function scopeOrUndefined(value: unknown): ChunkScopeKind | undefined {
+  const scope = stringOrUndefined(value);
+  if (scope === "main" || scope === "subagent" || scope === "chain") return scope;
+  return undefined;
+}
+
+function normalizeScope(
+  raw: string | undefined,
+  hints: { runId?: string; parentRunId?: string; agentName?: string },
+): ChunkScopeKind {
+  const normalized = raw?.toLowerCase();
+  if (normalized === "subagent" || normalized === "child" || normalized === "agent") {
+    return "subagent";
+  }
+  if (normalized === "chain") return "chain";
+  if (normalized === "main" || normalized === "parent") return "main";
+  if (hints.parentRunId || hints.agentName) return "subagent";
+  return "main";
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }

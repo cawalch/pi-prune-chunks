@@ -55,6 +55,7 @@ type SessionSignals = {
   pressureBand: PressureBand;
   taskPhase: TaskPhase;
   modelProfile: "auto" | "local-32k" | "cloud-1m";
+  subagentManifestScopes: Set<string>;
 };
 
 export function contextPercent(usage?: ContextUsage | null): number | null {
@@ -583,6 +584,11 @@ function scoreCandidateAdaptive(
     reasons.push("cloud-1m preserves more context");
   }
 
+  if (isSubagentExplorationAfterManifest(chunk, signals)) {
+    score += 600;
+    reasons.push("subagent context isolated after child manifest");
+  }
+
   if (
     signals.taskPhase === "verification" &&
     ["search", "flow_trace", "outline", "symbol"].includes(chunk.kind)
@@ -630,6 +636,7 @@ function inferSessionSignals(
     pressureBand: pressureBand(pressurePercent, config),
     taskPhase: inferTaskPhase(recent),
     modelProfile: config.autoPrune.modelProfile,
+    subagentManifestScopes: subagentManifestScopes(active),
   };
 }
 
@@ -685,6 +692,35 @@ function candidateConfidence(
   if (lift >= 900 || reasons.length >= 5) return "high";
   if (lift >= 350 || reasons.length >= 3) return "medium";
   return "low";
+}
+
+function subagentManifestScopes(chunks: ContextChunk[]): Set<string> {
+  const scopes = new Set<string>();
+  for (const chunk of chunks) {
+    if ((chunk.scope?.scope ?? "main") === "main") continue;
+    if (["context_pack", "other", "test_output"].includes(chunk.kind)) {
+      scopes.add(scopeKey(chunk));
+    }
+  }
+  return scopes;
+}
+
+function isSubagentExplorationAfterManifest(chunk: ContextChunk, signals: SessionSignals): boolean {
+  if ((chunk.scope?.scope ?? "main") === "main") return false;
+  if (!["search", "flow_trace", "outline", "symbol"].includes(chunk.kind)) return false;
+  return signals.subagentManifestScopes.has(scopeKey(chunk));
+}
+
+function scopeKey(chunk: ContextChunk): string {
+  const scope = chunk.scope;
+  return [
+    scope?.scope ?? "main",
+    scope?.parentRunId ?? "",
+    scope?.runId ?? "",
+    scope?.agentName ?? "",
+  ]
+    .join(":")
+    .toLowerCase();
 }
 
 function supersededReason(previous: ContextChunk, current: ContextChunk): string | null {

@@ -1089,6 +1089,51 @@ describe("pruner and restorer", () => {
     );
   });
 
+  test("subagent scope grouping prioritizes child exploration after a manifest", async () => {
+    const config = testConfig();
+    config.autoPrune.policy = "adaptive-v1";
+    const registry = new ChunkRegistry();
+    const childScope = {
+      scope: "subagent" as const,
+      runId: "child-1",
+      parentRunId: "parent-1",
+      agentName: "researcher",
+    };
+    const childSearch = collectToolResult({
+      toolCallId: "child_search",
+      toolName: "code_search",
+      content: textBlock("src/a.ts:1: child hit\n".repeat(160)),
+      scope: childScope,
+      config,
+    });
+    const childManifest = collectToolResult({
+      toolCallId: "child_manifest",
+      toolName: "reamerx_edit_pack",
+      content: textBlock("child evidence manifest\nreadiness: ready\n".repeat(120)),
+      scope: childScope,
+      config,
+    });
+    assert.ok(childSearch);
+    assert.ok(childManifest);
+    const searchChunk = registry.addCollected(childSearch, Date.now() - 20 * 60_000);
+    registry.markSeenByToolCallId("child_search");
+    registry.addCollected(childManifest, Date.now() - 10 * 60_000);
+    registry.markSeenByToolCallId("child_manifest");
+
+    const subagentList = registry.list({ scope: "subagent", limit: 10 });
+    assert.equal(subagentList.chunks.length, 2);
+    assert.equal(subagentList.chunks[0].scope?.agentName, "researcher");
+
+    const candidates = suggestPruneCandidates(registry, config, { limit: 10 });
+    const childCandidate = candidates.find((candidate) => candidate.id === searchChunk.id);
+    assert.ok(childCandidate);
+    assert.ok(childCandidate.reasons.includes("subagent context isolated after child manifest"));
+
+    registry.prune([searchChunk.id], "child manifest consolidated");
+    const [restored] = await restoreChunks(registry, [searchChunk.id], config);
+    assert.equal(restored.status, "restored");
+  });
+
   test("adaptive policy protects restored chunks and includes restore history in scores", async () => {
     const config = mergeConfig({
       track: { minChunkTokens: 1 },
@@ -1409,6 +1454,31 @@ describe("extension integration", () => {
     );
     assert.equal(messages[0].content[0].text, "src/a.ts:1: result\n".repeat(250));
     assert.ok(pi.entries.length > 0, "auto-prune should persist metadata");
+  });
+
+  test("extension tags chunks with subagent scope metadata and filters lists", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.handlers.tool_result?.({
+      toolCallId: "child_tool",
+      toolName: "code_search",
+      content: textBlock("src/child.ts:1: hit\n".repeat(160)),
+      metadata: {
+        scope: "subagent",
+        runId: "child-run",
+        parentRunId: "parent-run",
+        agentName: "researcher",
+      },
+    });
+
+    const subagent = await pi.tools.list_context_chunks.execute("list", { scope: "subagent" });
+    assert.equal(subagent.details.chunks.length, 1);
+    assert.equal(subagent.details.chunks[0].scope.agentName, "researcher");
+    assert.ok(subagent.content[0].text.includes("scope:subagent:researcher/child-run"));
+
+    const main = await pi.tools.list_context_chunks.execute("list", { scope: "main" });
+    assert.equal(main.details.chunks.length, 0);
   });
 
   test("context report tool and prune-report command expose telemetry without raw output", async () => {

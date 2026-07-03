@@ -33,7 +33,7 @@ export function renderChunkList(output: ChunkListOutput): string {
         (chunk.pruned ? "yes" : "no ").padEnd(5),
         String(chunk.tokenEstimate).padStart(6),
         restoreLabel(chunk).padEnd(16),
-        chunk.part ? `${chunk.label} [part:${chunk.part.role}]` : chunk.label,
+        labelWithScope(chunk),
       ].join(" "),
     );
     if (chunk.decisionCard) {
@@ -42,6 +42,16 @@ export function renderChunkList(output: ChunkListOutput): string {
   }
 
   return lines.join("\n");
+}
+
+function labelWithScope(chunk: ChunkListOutput["chunks"][number]): string {
+  const markers: string[] = [];
+  if (chunk.part) markers.push(`part:${chunk.part.role}`);
+  if (chunk.scope && chunk.scope.scope !== "main") {
+    const details = [chunk.scope.agentName, chunk.scope.runId].filter(Boolean).join("/");
+    markers.push(details ? `scope:${chunk.scope.scope}:${details}` : `scope:${chunk.scope.scope}`);
+  }
+  return markers.length > 0 ? `${chunk.label} [${markers.join(" ")}]` : chunk.label;
 }
 
 function restoreLabel(chunk: ChunkListOutput["chunks"][number]): string {

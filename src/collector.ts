@@ -11,6 +11,7 @@ import {
 import type {
   ChunkKind,
   ChunkRisk,
+  ChunkScope,
   ChunkSource,
   CollectedChunk,
   ContentBlock,
@@ -22,6 +23,7 @@ type ToolResultInput = {
   toolName: string;
   content: ContentBlock[];
   params?: Record<string, unknown>;
+  scope?: ChunkScope;
   config: PruneChunksConfig;
 };
 
@@ -155,6 +157,7 @@ export const INTERNAL_TOOL_NAMES = new Set([
   "pin_chunks",
   "unpin_chunks",
   "context_pressure",
+  "context_report",
 ]);
 
 export function collectToolResult(input: ToolResultInput): CollectedChunk | null {
@@ -193,6 +196,7 @@ export function collectToolResult(input: ToolResultInput): CollectedChunk | null
     summary,
     decisionCard,
     source,
+    scope: input.scope,
   };
 }
 

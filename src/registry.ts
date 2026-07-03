@@ -64,6 +64,7 @@ export class ChunkRegistry {
         existing.restoreAvailable = true;
         existing.restoreUnavailableReason = undefined;
         existing.tokenEstimate = collected.tokenEstimate;
+        existing.scope = collected.scope;
         existing.summary = collected.summary;
         existing.decisionCard = collected.decisionCard;
         this.cache.set(existing.id, collected.content);
@@ -81,6 +82,7 @@ export class ChunkRegistry {
     const chunk: ContextChunk = {
       id,
       toolName: collected.toolName,
+      scope: collected.scope,
       label: collected.label,
       kind: collected.kind,
       risk: collected.risk,
@@ -144,6 +146,9 @@ export class ChunkRegistry {
     if (options.kind) {
       entries = entries.filter((chunk) => chunk.kind === options.kind);
     }
+    if (options.scope) {
+      entries = entries.filter((chunk) => (chunk.scope?.scope ?? "main") === options.scope);
+    }
     if (options.pruned !== undefined) {
       entries = entries.filter((chunk) => chunk.pruned === options.pruned);
     }
@@ -170,6 +175,7 @@ export class ChunkRegistry {
         id: chunk.id,
         parentId: chunk.parentId,
         part: chunk.part ? { ...chunk.part } : undefined,
+        scope: chunk.scope ? { ...chunk.scope } : undefined,
         label: chunk.label,
         toolName: chunk.toolName,
         kind: chunk.kind,
@@ -363,6 +369,7 @@ export class ChunkRegistry {
             }
           : undefined,
         source: chunk.source ? { ...chunk.source } : undefined,
+        scope: chunk.scope ? { ...chunk.scope } : undefined,
       })),
       audit: this.auditTrail(200),
     };
@@ -426,6 +433,7 @@ export class ChunkRegistry {
         },
         label: `${parent.label}#${part.label}`,
         tokenEstimate: part.tokenEstimate,
+        scope: parent.scope ? { ...parent.scope } : undefined,
         source: parent.source
           ? {
               ...parent.source,
@@ -523,6 +531,7 @@ function cloneChunk(chunk: ContextChunk): ContextChunk {
         }
       : undefined,
     source: chunk.source ? { ...chunk.source } : undefined,
+    scope: chunk.scope ? { ...chunk.scope } : undefined,
   };
 }
 
