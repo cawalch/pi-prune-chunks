@@ -54,7 +54,7 @@ type TaskPhase = "exploration" | "editing" | "verification";
 type SessionSignals = {
   pressureBand: PressureBand;
   taskPhase: TaskPhase;
-  modelProfile: "auto" | "local-32k" | "cloud-1m";
+  modelProfile: PruneChunksConfig["autoPrune"]["modelProfile"];
   subagentManifestScopes: Set<string>;
 };
 
@@ -239,8 +239,9 @@ export function pressureSummary(
   largestUnprunedChunks: PruneCandidate[];
   autoPrune: {
     enabled: boolean;
+    profile: PruneChunksConfig["profile"];
     policy: "heuristic-v1" | "adaptive-v1";
-    modelProfile: "auto" | "local-32k" | "cloud-1m";
+    modelProfile: PruneChunksConfig["autoPrune"]["modelProfile"];
     pressureBand: PressureBand;
     currentPercent: number | null;
     startAtPercent: number;
@@ -281,6 +282,7 @@ export function pressureSummary(
     autoPrune: {
       enabled: config.autoPrune.enabled,
       currentPercent: contextPercent(usage),
+      profile: config.profile,
       policy: config.autoPrune.policy,
       modelProfile: config.autoPrune.modelProfile,
       pressureBand: pressureBand(pct, config),
@@ -576,9 +578,9 @@ function scoreCandidateAdaptive(
     reasons.push("extreme pressure");
   }
 
-  if (signals.modelProfile === "local-32k") {
-    score += Math.round(chunk.tokenEstimate * 0.25);
-    reasons.push("local-32k tighter window");
+  if (signals.modelProfile === "local-32k" || signals.modelProfile === "local-64k") {
+    score += Math.round(chunk.tokenEstimate * (signals.modelProfile === "local-32k" ? 0.25 : 0.15));
+    reasons.push(`${signals.modelProfile} tighter window`);
   } else if (signals.modelProfile === "cloud-1m") {
     score -= 300;
     reasons.push("cloud-1m preserves more context");
@@ -665,7 +667,11 @@ function pressureBand(
 function adaptiveMinChunkTokens(config: PruneChunksConfig, band: PressureBand): number {
   if (band === "extreme")
     return Math.min(config.track.minChunkTokens, config.autoPrune.minChunkTokens);
-  if (config.autoPrune.modelProfile === "local-32k" && band === "high") {
+  if (
+    (config.autoPrune.modelProfile === "local-32k" ||
+      config.autoPrune.modelProfile === "local-64k") &&
+    band === "high"
+  ) {
     return Math.min(config.track.minChunkTokens, config.autoPrune.minChunkTokens);
   }
   if (config.autoPrune.modelProfile === "cloud-1m" && band === "normal") {
@@ -675,10 +681,12 @@ function adaptiveMinChunkTokens(config: PruneChunksConfig, band: PressureBand): 
 }
 
 function unboundedReadPressureFloor(
-  modelProfile: "auto" | "local-32k" | "cloud-1m",
+  modelProfile: PruneChunksConfig["autoPrune"]["modelProfile"],
   startAtPercent: number,
 ): number {
   if (modelProfile === "local-32k") return startAtPercent + 10;
+  if (modelProfile === "local-64k") return startAtPercent + 12;
+  if (modelProfile === "cloud-200k") return startAtPercent + 18;
   if (modelProfile === "cloud-1m") return startAtPercent + 20;
   return startAtPercent + 15;
 }
@@ -800,13 +808,22 @@ function protectedRecentChunkCount(
   const configured = Math.max(0, config.autoPrune.preserveRecentChunks);
   if (pressurePercent == null) return configured;
   if (config.autoPrune.policy === "adaptive-v1") {
-    if (config.autoPrune.modelProfile === "local-32k") {
-      if (pressurePercent >= config.autoPrune.startAtPercent + 5) return 0;
+    if (
+      config.autoPrune.modelProfile === "local-32k" ||
+      config.autoPrune.modelProfile === "local-64k"
+    ) {
+      const relaxAt = config.autoPrune.modelProfile === "local-32k" ? 5 : 8;
+      if (pressurePercent >= config.autoPrune.startAtPercent + relaxAt) return 0;
       return Math.min(configured, 2);
     }
-    if (config.autoPrune.modelProfile === "cloud-1m") {
-      if (pressurePercent >= config.autoPrune.startAtPercent + 20) return Math.min(configured, 2);
-      return configured + 2;
+    if (
+      config.autoPrune.modelProfile === "cloud-200k" ||
+      config.autoPrune.modelProfile === "cloud-1m"
+    ) {
+      const relaxAt = config.autoPrune.modelProfile === "cloud-1m" ? 20 : 15;
+      if (pressurePercent >= config.autoPrune.startAtPercent + relaxAt)
+        return Math.min(configured, 2);
+      return configured + (config.autoPrune.modelProfile === "cloud-1m" ? 2 : 1);
     }
   }
   if (pressurePercent >= config.autoPrune.startAtPercent + 10) return 0;

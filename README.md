@@ -113,6 +113,7 @@ Pi may provide extension config under `pruneChunks`:
 ```json
 {
   "pruneChunks": {
+    "profile": "coding-heavy",
     "enabled": true,
     "trackTools": ["*"],
     "track": { "minChunkTokens": 200 },
@@ -160,6 +161,8 @@ Pi may provide extension config under `pruneChunks`:
 }
 ```
 
+Profiles apply named defaults before explicit config overrides. Available profiles are `local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`, `privacy-max`, `research-heavy`, `coding-heavy`, and `debug-failures`. For example, `"profile": "local-32k"` lowers prune thresholds and compacts tombstones earlier, while `"profile": "cloud-1m"` preserves more recent evidence and prunes mostly for latency/noise. Any explicit field such as `autoPrune.targetPercent` overrides the selected profile.
+
 Raw tool output is not persisted to disk by default. For backward-compatible config, `"diskCache": true` is accepted and expands to the default durable-cache settings.
 
 ## Safety Model
@@ -191,6 +194,8 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
   evidence (`edit_pack`, `slice`, or `changes`) is acquired, while the terminal
   evidence remains active.
 - Exact duplicate tool outputs are scored higher as prune candidates.
+- Named policy profiles: top-level `profile` selects workload/model-window
+  defaults; explicit config overrides always win.
 - Adaptive policy mode is the default: `autoPrune.policy: "adaptive-v1"` adds
   deterministic restore-cost, pressure-band, task-phase, model-profile, and
   restore-history scoring. `modelProfile: "local-32k"` prunes more aggressively
