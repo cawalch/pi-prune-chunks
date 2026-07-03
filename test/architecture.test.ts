@@ -374,6 +374,46 @@ describe("registry and tombstones", () => {
     assert.equal(compact.includes("summary="), false);
     assert.ok(compact.length < normal.length / 2);
   });
+
+  test("supports partial pruning and selective child restore", async () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const text = [
+      "$ npm test",
+      "FAIL test/example.test.ts",
+      "AssertionError: expected true",
+      ...Array.from({ length: 900 }, (_, index) => `bulk stdout line ${index}`),
+    ].join("\n");
+    const parent = addChunk(registry, config, "test_tool", "bash", text, { command: "npm test" });
+    const parts = registry.all().filter((chunk) => chunk.parentId === parent.id);
+    assert.equal(parts.length, 1);
+    const bulk = parts[0];
+    assert.equal(bulk.id, `${parent.id}#bulk`);
+    assert.equal(bulk.part?.role, "bulk");
+    assert.ok(bulk.tokenEstimate > parent.tokenEstimate);
+
+    registry.prune([bulk.id], "partial prune bulk output");
+    const applied = applyPrunedTombstones(
+      [{ role: "toolResult", toolCallId: "test_tool", content: textBlock(text) }],
+      (toolCallId) => registry.prunedForToolCall(toolCallId),
+      config,
+      {},
+      (toolCallId) => registry.prunedPartsForToolCall(toolCallId),
+    );
+    const rendered = applied.messages[0].content?.[0].text ?? "";
+    assert.equal(applied.modified, true);
+    assert.ok(rendered.includes("FAIL test/example.test.ts"));
+    assert.ok(rendered.includes(`[pruned:${bulk.id}`));
+    assert.equal(rendered.includes("bulk stdout line 200"), false);
+
+    const [restoreResult] = await restoreChunks(registry, [bulk.id], config);
+    assert.equal(restoreResult.status, "restored");
+    assert.equal(registry.prunedPartsForToolCall("test_tool").length, 0);
+
+    registry.prune([parent.id], "full prune after partial restore");
+    const [parentRestore] = await restoreChunks(registry, [parent.id], config);
+    assert.equal(parentRestore.status, "restored");
+  });
 });
 
 describe("pruner and restorer", () => {

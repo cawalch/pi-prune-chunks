@@ -49,8 +49,18 @@ export interface ChunkDecisionCard {
   generatedBy: "heuristic" | "model";
 }
 
+export interface ChunkPart {
+  index: number;
+  label: string;
+  lineStart?: number;
+  lineEnd?: number;
+  role: "kept_summary" | "bulk" | "failure" | "source" | "metadata";
+}
+
 export interface ContextChunk {
   id: string;
+  parentId?: string;
+  part?: ChunkPart;
   toolName: string;
   label: string;
   kind: ChunkKind;
@@ -172,6 +182,8 @@ export type ChunkListOutput = {
   listed: number;
   chunks: Array<{
     id: string;
+    parentId?: string;
+    part?: ChunkPart;
     label: string;
     toolName: string;
     kind: ChunkKind;

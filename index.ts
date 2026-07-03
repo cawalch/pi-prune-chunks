@@ -106,6 +106,7 @@ export default function (pi: ExtensionAPI) {
         compact: shouldCompactTombstones(usage, config),
         coalesce: shouldCoalesceTombstones(usage, config),
       },
+      (toolCallId) => registry.prunedPartsForToolCall(toolCallId),
     );
     const guarded = compactFailedToolValidationMessages(tombstones.messages, config);
 

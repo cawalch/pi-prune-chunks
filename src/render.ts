@@ -31,7 +31,7 @@ export function renderChunkList(output: ChunkListOutput): string {
         (chunk.pruned ? "yes" : "no ").padEnd(5),
         String(chunk.tokenEstimate).padStart(6),
         restoreLabel(chunk).padEnd(16),
-        chunk.label,
+        chunk.part ? `${chunk.label} [part:${chunk.part.role}]` : chunk.label,
       ].join(" "),
     );
     if (chunk.decisionCard) {
