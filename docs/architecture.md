@@ -2,11 +2,13 @@
 
 `pi-prune-chunks` is split into five layers:
 
-1. Collector: turns large text tool results into typed chunk candidates.
+1. Collector: turns large text tool results into typed chunk candidates and
+   deterministic decision cards.
 2. Registry: owns `ContextChunk` metadata, stable IDs, pin/prune state, audit
    events, and configured content caches.
 3. Pruner: scores safe candidates and applies manual or automatic pruning.
-4. Tombstones: renders compact provider-context replacements.
+4. Tombstones: renders compact provider-context replacements with decision-card
+   previews under the configured summary budget.
 5. Restorer: restores from memory first, then optional durable disk cache, then
    source file ranges when available.
 

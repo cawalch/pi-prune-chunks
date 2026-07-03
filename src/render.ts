@@ -1,3 +1,4 @@
+import { compactDecisionCard } from "./cards";
 import type { PruneCandidate } from "./pruner";
 import { contextPercent, pressureSummary } from "./pruner";
 import type { ChunkRegistry } from "./registry";
@@ -33,6 +34,9 @@ export function renderChunkList(output: ChunkListOutput): string {
         chunk.label,
       ].join(" "),
     );
+    if (chunk.decisionCard) {
+      lines.push(`  card: ${compactDecisionCard(chunk.decisionCard, 160)}`);
+    }
   }
 
   return lines.join("\n");

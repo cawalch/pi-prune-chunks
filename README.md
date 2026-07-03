@@ -34,7 +34,7 @@ Or in Pi settings:
    tombstone like:
 
 ```text
-[pruned:pc_0001_a1b2c3 search/code_search "src/a.ts:10" ~1200t summary="..." restore="restore_chunks({ids:['pc_0001_a1b2c3']})"]
+[pruned:pc_0001_a1b2c3 search/code_search "src/a.ts:10" ~1200t card="search returned 2 top paths | evidence: src/a.ts; src/b.ts | restore when: need full snippets" restore="restore_chunks({ids:['pc_0001_a1b2c3']})"]
 ```
 
 Saved transcript entries are not rewritten or deleted.
@@ -44,7 +44,7 @@ Saved transcript entries are not rewritten or deleted.
 ### `list_context_chunks`
 
 Lists tracked chunks with kind, risk, token estimate, prune/pin state, restore
-availability, summary, and source metadata.
+availability, decision-card preview, and source metadata.
 
 ```ts
 {
@@ -187,7 +187,8 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
   prompts or ordinary conversation history. If non-chunk overhead dominates,
   conversation-level compression is a separate mechanism.
 - Transparent: every pruned chunk leaves a tombstone with ID, kind, tool, label,
-  token estimate, optional summary, and restore hint.
+  token estimate, deterministic decision-card summary, and restore hint. Cards
+  preserve a gist, key evidence, and restore triggers without requiring an LLM.
 - High-pressure tombstones: once provider context reaches the compact threshold,
   tombstones shrink to ID/kind/token markers to avoid tombstone overhead causing
   compaction or provider-window failures.
