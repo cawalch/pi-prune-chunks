@@ -1599,6 +1599,49 @@ describe("extension integration", () => {
     assert.ok(pi.ui.notices.at(-1)?.includes("Continuation manifest: none prepared."));
   });
 
+  test("prune-profile command switches live profile and persists state", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    await pi.commands["prune-profile"].run("", { ui: pi.ui });
+    assert.ok(pi.ui.notices.at(-1)?.includes("Active prune profile: coding-heavy"));
+
+    await pi.commands["prune-profile"].run("local-32k", { ui: pi.ui });
+    assert.ok(pi.ui.notices.at(-1)?.includes("switched to local-32k"));
+    const pressure = await pi.tools.context_pressure.execute("pressure", {}, undefined, undefined, {
+      getContextUsage: () => ({ tokens: 5_000, contextWindow: 10_000, percent: 50 }),
+    });
+    assert.ok(pressure.content[0].text.includes("profile=local-32k"));
+    assert.equal(pi.entries.at(-1)?.data.state.activeProfile, "local-32k");
+
+    await pi.commands["prune-profile"].run("unknown-profile", { ui: pi.ui });
+    assert.ok(pi.ui.notices.at(-1)?.includes("Unknown prune profile"));
+
+    await pi.commands["prune-profile"].run("reset", { ui: pi.ui });
+    assert.ok(pi.ui.notices.at(-1)?.includes("reset to settings/default: coding-heavy"));
+  });
+
+  test("session_start restores a persisted live prune profile", async () => {
+    const first = createMockPi(testConfig());
+    extension(first as never);
+    await first.commands["prune-profile"].run("cloud-200k", { ui: first.ui });
+
+    const second = createMockPi(testConfig());
+    extension(second as never);
+    await second.handlers.session_start?.(
+      {},
+      { sessionManager: { getEntries: () => first.entries } },
+    );
+    const pressure = await second.tools.context_pressure.execute(
+      "pressure",
+      {},
+      undefined,
+      undefined,
+      { getContextUsage: () => ({ tokens: 5_000, contextWindow: 10_000, percent: 50 }) },
+    );
+    assert.ok(pressure.content[0].text.includes("profile=cloud-200k"));
+  });
+
   test("prune-restore command restores pruned chunks", async () => {
     const pi = createMockPi(testConfig());
     extension(pi as never);
@@ -1607,6 +1650,7 @@ describe("extension integration", () => {
       "prune-status",
       "prune-largest",
       "prune-suggest",
+      "prune-profile",
       "prune-now",
       "prune-report",
       "prune-restore",

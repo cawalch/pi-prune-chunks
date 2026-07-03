@@ -97,6 +97,8 @@ Named profiles tune these thresholds for common workloads and context windows:
 `local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`, `privacy-max`,
 `research-heavy`, `coding-heavy`, and `debug-failures`. Profiles are only
 presets: explicit user config is merged after the profile and takes precedence.
+Use `/prune-profile <name>` to switch the active profile in a live session;
+`/prune-profile reset` returns to the configured settings/default profile.
 
 `autoPrune.policy: "heuristic-v1"` remains available for sessions that need the
 previous conservative compatibility behavior.
