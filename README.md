@@ -37,14 +37,15 @@ Or in Pi settings:
 [pruned:pc_0001_a1b2c3 search/code_search "src/a.ts:10" ~1200t card="search returned 2 top paths | evidence: src/a.ts; src/b.ts | restore when: need full snippets" restore="restore_chunks({ids:['pc_0001_a1b2c3']})"]
 ```
 
-Saved transcript entries are not rewritten or deleted.
+Saved transcript entries are not rewritten or deleted. Very large results may also expose child part IDs such as `pc_0001_a1b2c3#bulk`; pruning that child keeps the high-signal prefix/failure lines visible while tombstoning only the bulky tail.
 
 ## Tools
 
 ### `list_context_chunks`
 
 Lists tracked chunks with kind, risk, token estimate, prune/pin state, restore
-availability, decision-card preview, and source metadata.
+availability, decision-card preview, source metadata, and child part markers for
+partial-prune candidates.
 
 ```ts
 {
@@ -186,6 +187,10 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
 - Scope boundary: this extension prunes tracked tool-result chunks, not system
   prompts or ordinary conversation history. If non-chunk overhead dominates,
   conversation-level compression is a separate mechanism.
+- Partial pruning: very large results can be split into restorable child parts
+  such as `#bulk`. Pruning a child removes only that line range from provider
+  context while retaining the parent prefix/failure metadata and allowing
+  selective child restore by ID.
 - Transparent: every pruned chunk leaves a tombstone with ID, kind, tool, label,
   token estimate, deterministic decision-card summary, and restore hint. Cards
   preserve a gist, key evidence, and restore triggers without requiring an LLM.

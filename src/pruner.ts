@@ -74,6 +74,7 @@ export function suggestPruneCandidates(
   const candidates: PruneCandidate[] = [];
 
   for (const chunk of active) {
+    if (!chunk.part && registry.hasChildren(chunk.id)) continue;
     const blockedReason = autoPruneBlockedReason(
       chunk,
       config,
@@ -160,6 +161,7 @@ export function pruneSupersededAfterCollect(
 
   for (const previous of registry.active()) {
     if (previous.id === chunk.id) continue;
+    if (!previous.part && registry.hasChildren(previous.id)) continue;
     if (previous.pinned || previous.risk === "high" || !previous.restoreAvailable) continue;
 
     const reason = supersededReason(previous, chunk);

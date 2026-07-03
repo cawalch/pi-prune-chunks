@@ -1,4 +1,5 @@
 import { compactDecisionCard } from "./cards";
+import { applyPartTombstonesToContent } from "./parts";
 import { truncateText } from "./text";
 import type { ContentBlock, ContextChunk, PruneChunksConfig } from "./types";
 
@@ -44,8 +45,9 @@ export function applyPrunedTombstones<
   getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
   config: PruneChunksConfig,
   options: TombstoneOptions = {},
+  getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
 ): { messages: T[]; modified: boolean } {
-  if (options.coalesce) {
+  if (options.coalesce && !hasPrunedParts(messages, getPrunedParts)) {
     return applyCoalescedPrunedTombstones(messages, getPrunedChunk, config, options);
   }
 
@@ -53,11 +55,22 @@ export function applyPrunedTombstones<
   const mapped = messages.map((message) => {
     if (message.role !== "toolResult" || !message.toolCallId) return message;
     const chunk = getPrunedChunk(message.toolCallId);
-    if (!chunk) return message;
+    const prunedParts = getPrunedParts(message.toolCallId);
+    if (!chunk && prunedParts.length === 0) return message;
     modified = true;
+    if (chunk) {
+      return {
+        ...message,
+        content: tombstoneFor(chunk, config, options),
+      };
+    }
     return {
       ...message,
-      content: tombstoneFor(chunk, config, options),
+      content: applyPartTombstonesToContent(message.content ?? [], prunedParts, (part) =>
+        tombstoneFor(part, config, options)
+          .map((block) => block.text ?? "")
+          .join("\n"),
+      ),
     };
   });
   return { messages: mapped, modified };
@@ -73,10 +86,16 @@ function applyCoalescedPrunedTombstones<
 ): { messages: T[]; modified: boolean } {
   const pruned = prunedMessages(messages, getPrunedChunk);
   if (pruned.length <= 1) {
-    return applyPrunedTombstones(messages, getPrunedChunk, config, {
-      ...options,
-      coalesce: false,
-    });
+    return applyPrunedTombstones(
+      messages,
+      getPrunedChunk,
+      config,
+      {
+        ...options,
+        coalesce: false,
+      },
+      () => [],
+    );
   }
 
   const newestPruned = pruned[pruned.length - 1];
@@ -113,6 +132,18 @@ function applyCoalescedPrunedTombstones<
   }
 
   return { messages: output, modified: true };
+}
+
+function hasPrunedParts<T extends { role: string; toolCallId?: string }>(
+  messages: T[],
+  getPrunedParts: (toolCallId: string) => ContextChunk[],
+): boolean {
+  return messages.some(
+    (message) =>
+      message.role === "toolResult" &&
+      !!message.toolCallId &&
+      getPrunedParts(message.toolCallId).length > 0,
+  );
 }
 
 function prunedMessages<T extends { role: string; toolCallId?: string }>(

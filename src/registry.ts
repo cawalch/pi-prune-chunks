@@ -1,3 +1,4 @@
+import { parentTokenEstimate, planChunkParts } from "./parts";
 import { hashText } from "./text";
 import type {
   ChunkActionResult,
@@ -71,6 +72,11 @@ export class ChunkRegistry {
     }
 
     const id = this.nextChunkId(collected.toolCallId, collected.toolName, collected.text);
+    const parts = planChunkParts({
+      kind: collected.kind,
+      content: collected.content,
+      tokenEstimate: collected.tokenEstimate,
+    });
     const restoreMode = inferRestoreMode(true, collected.source, this.cache.has(id, "disk_cache"));
     const chunk: ContextChunk = {
       id,
@@ -78,7 +84,10 @@ export class ChunkRegistry {
       label: collected.label,
       kind: collected.kind,
       risk: collected.risk,
-      tokenEstimate: collected.tokenEstimate,
+      tokenEstimate:
+        parts.length > 0
+          ? parentTokenEstimate(collected.tokenEstimate, parts)
+          : collected.tokenEstimate,
       createdAt: now,
       updatedAt: now,
       pruned: false,
@@ -98,6 +107,7 @@ export class ChunkRegistry {
     this.toolCallIndex.set(collected.toolCallId, id);
     this.cache.set(id, collected.content);
     this.audit(id, "tracked", undefined, now);
+    this.addPartChunks(chunk, collected, parts, now);
     return chunk;
   }
 
@@ -158,6 +168,8 @@ export class ChunkRegistry {
       listed: sliced.length,
       chunks: sliced.map((chunk) => ({
         id: chunk.id,
+        parentId: chunk.parentId,
+        part: chunk.part ? { ...chunk.part } : undefined,
         label: chunk.label,
         toolName: chunk.toolName,
         kind: chunk.kind,
@@ -190,6 +202,18 @@ export class ChunkRegistry {
   prunedForToolCall(toolCallId: string): ContextChunk | undefined {
     const chunk = this.getByToolCallId(toolCallId);
     return chunk?.pruned ? chunk : undefined;
+  }
+
+  prunedPartsForToolCall(toolCallId: string): ContextChunk[] {
+    const parent = this.getByToolCallId(toolCallId);
+    if (!parent) return [];
+    return this.all()
+      .filter((chunk) => chunk.parentId === parent.id && chunk.pruned)
+      .sort((a, b) => (a.part?.index ?? 0) - (b.part?.index ?? 0));
+  }
+
+  hasChildren(id: string): boolean {
+    return this.all().some((chunk) => chunk.parentId === id);
   }
 
   markSeenByToolCallId(toolCallId: string, now = Date.now()): void {
@@ -377,6 +401,58 @@ export class ChunkRegistry {
     this.auditEvents.length = 0;
     this.cache.clear();
     this.counter = 0;
+  }
+
+  private addPartChunks(
+    parent: ContextChunk,
+    collected: CollectedChunk,
+    parts: ReturnType<typeof planChunkParts>,
+    now: number,
+  ): void {
+    parts.forEach((part, index) => {
+      const id = `${parent.id}#${part.idSuffix}`;
+      const child: ContextChunk = {
+        ...parent,
+        id,
+        parentId: parent.id,
+        part: {
+          index,
+          label: part.label,
+          lineStart: part.lineStart,
+          lineEnd: part.lineEnd,
+          role: part.role,
+        },
+        label: `${parent.label}#${part.label}`,
+        tokenEstimate: part.tokenEstimate,
+        source: parent.source
+          ? {
+              ...parent.source,
+              startLine:
+                parent.source.startLine != null
+                  ? parent.source.startLine + part.lineStart - 1
+                  : part.lineStart,
+              endLine:
+                parent.source.startLine != null
+                  ? parent.source.startLine + part.lineEnd - 1
+                  : part.lineEnd,
+            }
+          : parent.source,
+        createdAt: now,
+        updatedAt: now,
+        pruned: false,
+        pinned: false,
+        pruneReason: undefined,
+        pinReason: undefined,
+        summary: collected.summary,
+        decisionCard: collected.decisionCard,
+        restoreMode: inferRestoreMode(true, parent.source, this.cache.has(id, "disk_cache")),
+        restoreAvailable: true,
+        restoreUnavailableReason: undefined,
+      };
+      this.chunks.set(id, child);
+      this.cache.set(id, part.content);
+      this.audit(id, "tracked", `part of ${parent.id}`, now);
+    });
   }
 
   private nextChunkId(toolCallId: string, toolName: string, text: string): string {

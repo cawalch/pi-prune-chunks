@@ -8,7 +8,9 @@
    events, and configured content caches.
 3. Pruner: scores safe candidates and applies manual or automatic pruning.
 4. Tombstones: renders compact provider-context replacements with decision-card
-   previews under the configured summary budget.
+   previews under the configured summary budget. For partial child chunks, it
+   replaces only the child's source line range with a tombstone and keeps the
+   parent prefix/failure lines visible.
 5. Restorer: restores from memory first, then optional durable disk cache, then
    source file ranges when available.
 
@@ -26,6 +28,12 @@ that transcript, not a destructive transcript edit. By default raw content stays
 memory-only; setting `restore.diskCache.enabled` (or legacy `restore.diskCache:
 true`) adds a compressed content-addressed blob cache for exact restore after a
 Pi process restart.
+
+Large collected chunks can create child part chunks such as `#bulk`. The parent
+keeps the exact full content for full restore, while child chunks let the pruner
+or user remove a bulky tail without losing the high-signal prefix. Restoring the
+child ID makes the original provider-bound tool result visible again on the next
+context pass.
 
 The extension only manages tracked tool-result chunks. It reports provider
 tokens outside those chunks, but it does not compress the system prompt or
