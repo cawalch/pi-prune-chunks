@@ -30,11 +30,13 @@ function textBlock(text: string): ContentBlock[] {
   return [{ type: "text", text }];
 }
 
-function testConfig(overrides?: Partial<PruneChunksConfig>): PruneChunksConfig {
+function testConfig(overrides?: Parameters<typeof mergeConfig>[0]): PruneChunksConfig {
   return mergeConfig({
     track: { minChunkTokens: 1 },
     autoPrune: {
       enabled: true,
+      policy: "heuristic-v1",
+      modelProfile: "auto",
       startAtPercent: 70,
       targetPercent: 55,
       preserveRecentChunks: 0,
@@ -978,6 +980,155 @@ describe("pruner and restorer", () => {
     );
     assert.equal(pressure.autoPrune.currentPercent, 75);
     assert.equal(pressure.recommendedCandidates.length, 1);
+  });
+
+  test("adaptive policy changes outcomes by model profile and explains scores", () => {
+    const baseConfig = {
+      track: { minChunkTokens: 1 },
+      autoPrune: {
+        enabled: true,
+        policy: "adaptive-v1" as const,
+        startAtPercent: 70,
+        targetPercent: 55,
+        preserveRecentChunks: 0,
+        preserveRecentMinutes: 0,
+        minChunkTokens: 1,
+        maxChunksPerPass: 10,
+        pruneSupersededOnIngest: true,
+        pruneZeroMatchSearchesOnIngest: true,
+      },
+    };
+    const localConfig = mergeConfig({
+      ...baseConfig,
+      autoPrune: { ...baseConfig.autoPrune, modelProfile: "local-32k" as const },
+    });
+    const cloudConfig = mergeConfig({
+      ...baseConfig,
+      autoPrune: { ...baseConfig.autoPrune, modelProfile: "cloud-1m" as const },
+    });
+    const now = Date.now() - 60_000;
+
+    const localRegistry = new ChunkRegistry();
+    const localRead = addChunk(
+      localRegistry,
+      localConfig,
+      "local_read",
+      "read",
+      "large source file\n".repeat(220),
+      { path: "src/large.ts" },
+      now,
+    );
+    addChunk(
+      localRegistry,
+      localConfig,
+      "local_search",
+      "code_search",
+      "src/a.ts:1: hit\n".repeat(220),
+      undefined,
+      now,
+    );
+
+    const cloudRegistry = new ChunkRegistry();
+    const cloudRead = addChunk(
+      cloudRegistry,
+      cloudConfig,
+      "cloud_read",
+      "read",
+      "large source file\n".repeat(220),
+      { path: "src/large.ts" },
+      now,
+    );
+    addChunk(
+      cloudRegistry,
+      cloudConfig,
+      "cloud_search",
+      "code_search",
+      "src/a.ts:1: hit\n".repeat(220),
+      undefined,
+      now,
+    );
+
+    const localCandidates = suggestPruneCandidates(localRegistry, localConfig, {
+      pressurePercent: 80,
+    });
+    const cloudCandidates = suggestPruneCandidates(cloudRegistry, cloudConfig, {
+      pressurePercent: 80,
+    });
+
+    assert.equal(
+      localCandidates.some((candidate) => candidate.id === localRead.id),
+      true,
+    );
+    assert.equal(
+      cloudCandidates.some((candidate) => candidate.id === cloudRead.id),
+      false,
+    );
+    assert.equal(localCandidates[0].policy, "adaptive-v1");
+    assert.ok(localCandidates[0].confidence);
+
+    const pressure = pressureSummary(
+      localRegistry,
+      { tokens: 8_000, contextWindow: 10_000, percent: 80 },
+      localConfig,
+    );
+    assert.equal(pressure.autoPrune.policy, "adaptive-v1");
+    assert.equal(pressure.autoPrune.modelProfile, "local-32k");
+    assert.equal(pressure.autoPrune.pressureBand, "high");
+    assert.ok(
+      renderPressure(
+        localRegistry,
+        { tokens: 8_000, contextWindow: 10_000, percent: 80 },
+        localConfig,
+      ).includes("policy=adaptive-v1"),
+    );
+  });
+
+  test("adaptive policy protects restored chunks and includes restore history in scores", async () => {
+    const config = mergeConfig({
+      track: { minChunkTokens: 1 },
+      autoPrune: {
+        enabled: true,
+        policy: "adaptive-v1",
+        modelProfile: "local-32k",
+        startAtPercent: 70,
+        targetPercent: 55,
+        preserveRecentChunks: 0,
+        preserveRecentMinutes: 10,
+        minChunkTokens: 1,
+        maxChunksPerPass: 10,
+        pruneSupersededOnIngest: true,
+        pruneZeroMatchSearchesOnIngest: true,
+      },
+    });
+    const registry = new ChunkRegistry();
+    const now = Date.now();
+    const restored = addChunk(
+      registry,
+      config,
+      "restored_chunk",
+      "code_search",
+      "src/restored.ts:1: hit\n".repeat(220),
+      undefined,
+      now - 20 * 60_000,
+    );
+    registry.prune([restored.id], "manual");
+    const [result] = await restoreChunks(registry, [restored.id], config);
+    assert.equal(result.status, "restored");
+
+    const blocked = pressureSummary(
+      registry,
+      { tokens: 8_000, contextWindow: 10_000, percent: 80 },
+      config,
+    ).blockedCandidates;
+    assert.equal(blocked[0].id, restored.id);
+    assert.equal(blocked[0].reason, "restored recently");
+
+    const later = suggestPruneCandidates(registry, config, {
+      now: now + 30 * 60_000,
+      pressurePercent: 80,
+    });
+    assert.equal(later[0].id, restored.id);
+    assert.ok(later[0].reasons.includes("restored 1x before"));
   });
 
   test("pressure report explains protected chunks", () => {

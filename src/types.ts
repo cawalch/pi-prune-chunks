@@ -14,6 +14,10 @@ export type ChunkRisk = "low" | "medium" | "high";
 
 export type RestoreMode = "memory" | "disk_cache" | "source_rehydrate" | "unavailable";
 
+export type AutoPrunePolicyMode = "heuristic-v1" | "adaptive-v1";
+
+export type ModelProfile = "auto" | "local-32k" | "cloud-1m";
+
 export interface DiskCacheConfig {
   enabled: boolean;
   directory?: string;
@@ -70,6 +74,7 @@ export interface ContextChunk {
   updatedAt: number;
   lastSeenAt?: number;
   lastRestoredAt?: number;
+  restoreCount?: number;
   pruned: boolean;
   pinned: boolean;
   pruneReason?: string;
@@ -117,6 +122,8 @@ export type PruneChunksConfig = {
   };
   autoPrune: {
     enabled: boolean;
+    policy: AutoPrunePolicyMode;
+    modelProfile: ModelProfile;
     startAtPercent: number;
     targetPercent: number;
     preserveRecentChunks: number;
@@ -201,6 +208,7 @@ export type ChunkListOutput = {
     source?: ChunkSource;
     createdAt: number;
     lastRestoredAt?: number;
+    restoreCount?: number;
   }>;
 };
 
