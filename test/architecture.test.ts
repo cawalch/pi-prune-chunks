@@ -141,7 +141,63 @@ describe("collector", () => {
     assert.equal(chunk.source?.path, "src/file.ts");
     assert.equal(chunk.source?.startLine, 10);
     assert.ok(chunk.summary);
+    assert.equal(chunk.decisionCard?.generatedBy, "heuristic");
+    assert.match(chunk.decisionCard?.gist ?? "", /read src\/file.ts:10-12/);
+    assert.ok(chunk.decisionCard?.restoreWhen.includes("editing this source"));
     assert.ok(chunk.tokenEstimate > 0);
+  });
+
+  test("builds deterministic decision cards for common chunk kinds", () => {
+    const config = testConfig();
+    const zeroSearch = collectToolResult({
+      toolCallId: "search_zero",
+      toolName: "ffgrep",
+      content: textBlock("No matches found"),
+      params: { command: "rg MissingSymbol src" },
+      config,
+    });
+    assert.ok(zeroSearch);
+    assert.match(zeroSearch.decisionCard?.gist ?? "", /no matches/);
+    assert.ok(
+      zeroSearch.decisionCard?.safeToIgnoreWhen?.includes("absence of matches is sufficient"),
+    );
+
+    const failedTest = collectToolResult({
+      toolCallId: "test_fail",
+      toolName: "bash",
+      content: textBlock(
+        "$ npm test\nFAIL test/thing.test.ts\nAssertionError: expected true".repeat(20),
+      ),
+      params: { command: "npm test" },
+      config,
+    });
+    assert.ok(failedTest);
+    assert.equal(failedTest.kind, "test_output");
+    assert.ok(failedTest.decisionCard?.hazards?.includes("contains failure output"));
+    assert.ok(failedTest.decisionCard?.evidence.some((line) => line.includes("FAIL")));
+
+    const diff = collectToolResult({
+      toolCallId: "diff_1",
+      toolName: "bash",
+      content: textBlock("diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new".repeat(20)),
+      config,
+    });
+    assert.ok(diff);
+    assert.equal(diff.kind, "diff");
+    assert.match(diff.decisionCard?.gist ?? "", /diff touching 1 file/);
+    assert.deepEqual(diff.decisionCard?.evidence, ["src/a.ts"]);
+
+    const pack = collectToolResult({
+      toolCallId: "pack_1",
+      toolName: "reamerx_edit_pack",
+      content: textBlock(
+        "ReamerX edit-pack: ready\nreadiness: ready\ntests: test/architecture.test.ts".repeat(20),
+      ),
+      config,
+    });
+    assert.ok(pack);
+    assert.equal(pack.kind, "context_pack");
+    assert.ok(pack.decisionCard?.evidence.some((line) => /readiness/.test(line)));
   });
 
   test("infers source and low risk from read-only shell commands", () => {
@@ -276,6 +332,7 @@ describe("registry and tombstones", () => {
     const tombstone = tombstoneFor(chunk, config)[0].text ?? "";
     assert.ok(tombstone.includes(`[pruned:${chunk.id}`));
     assert.ok(tombstone.includes("context_pack/code_context"));
+    assert.ok(tombstone.includes("card="));
     assert.ok(tombstone.includes("restore_chunks"));
     assert.ok(tombstone.length < "large context\n".repeat(200).length / 4);
 

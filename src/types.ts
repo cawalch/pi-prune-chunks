@@ -39,6 +39,16 @@ export interface ChunkSource {
   mtimeMs?: number;
 }
 
+export interface ChunkDecisionCard {
+  gist: string;
+  evidence: string[];
+  restoreWhen: string[];
+  safeToIgnoreWhen?: string[];
+  sourceAnchors?: string[];
+  hazards?: string[];
+  generatedBy: "heuristic" | "model";
+}
+
 export interface ContextChunk {
   id: string;
   toolName: string;
@@ -55,6 +65,7 @@ export interface ContextChunk {
   pruneReason?: string;
   pinReason?: string;
   summary?: string;
+  decisionCard?: ChunkDecisionCard;
   source?: ChunkSource;
   restoreMode: RestoreMode;
   restoreAvailable: boolean;
@@ -138,6 +149,7 @@ export interface CollectedChunk {
   risk: ChunkRisk;
   tokenEstimate: number;
   summary?: string;
+  decisionCard?: ChunkDecisionCard;
   source?: ChunkSource;
 }
 
@@ -173,6 +185,7 @@ export type ChunkListOutput = {
     restoreAvailable: boolean;
     restoreUnavailableReason?: string;
     summary?: string;
+    decisionCard?: ChunkDecisionCard;
     source?: ChunkSource;
     createdAt: number;
     lastRestoredAt?: number;

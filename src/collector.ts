@@ -1,3 +1,4 @@
+import { buildDecisionCard } from "./cards";
 import {
   compactWhitespace,
   contentText,
@@ -171,6 +172,13 @@ export function collectToolResult(input: ToolResultInput): CollectedChunk | null
   const source = inferSource(input.toolCallId, input.toolName, text, input.params);
   const risk = classifyRisk(kind, text, source);
   const summary = summarizeText(text, input.config.tombstones.maxSummaryChars);
+  const decisionCard = buildDecisionCard({
+    kind,
+    toolName: input.toolName,
+    text,
+    source,
+    maxChars: input.config.tombstones.maxSummaryChars,
+  });
   const label = makeLabel(input.toolName, kind, text, source);
 
   return {
@@ -183,6 +191,7 @@ export function collectToolResult(input: ToolResultInput): CollectedChunk | null
     risk,
     tokenEstimate,
     summary,
+    decisionCard,
     source,
   };
 }

@@ -64,6 +64,7 @@ export class ChunkRegistry {
         existing.restoreUnavailableReason = undefined;
         existing.tokenEstimate = collected.tokenEstimate;
         existing.summary = collected.summary;
+        existing.decisionCard = collected.decisionCard;
         this.cache.set(existing.id, collected.content);
         return existing;
       }
@@ -83,6 +84,7 @@ export class ChunkRegistry {
       pruned: false,
       pinned: false,
       summary: collected.summary,
+      decisionCard: collected.decisionCard,
       source: collected.source,
       restoreMode,
       restoreAvailable: restoreMode !== "unavailable",
@@ -169,6 +171,7 @@ export class ChunkRegistry {
         restoreAvailable: chunk.restoreAvailable,
         restoreUnavailableReason: chunk.restoreUnavailableReason,
         summary: chunk.summary,
+        decisionCard: chunk.decisionCard,
         source: chunk.source,
         createdAt: chunk.createdAt,
         lastRestoredAt: chunk.lastRestoredAt,
@@ -319,6 +322,20 @@ export class ChunkRegistry {
       version: 1,
       chunks: this.all().map((chunk) => ({
         ...chunk,
+        decisionCard: chunk.decisionCard
+          ? {
+              ...chunk.decisionCard,
+              evidence: [...chunk.decisionCard.evidence],
+              restoreWhen: [...chunk.decisionCard.restoreWhen],
+              safeToIgnoreWhen: chunk.decisionCard.safeToIgnoreWhen
+                ? [...chunk.decisionCard.safeToIgnoreWhen]
+                : undefined,
+              sourceAnchors: chunk.decisionCard.sourceAnchors
+                ? [...chunk.decisionCard.sourceAnchors]
+                : undefined,
+              hazards: chunk.decisionCard.hazards ? [...chunk.decisionCard.hazards] : undefined,
+            }
+          : undefined,
         source: chunk.source ? { ...chunk.source } : undefined,
       })),
       audit: this.auditTrail(200),
@@ -413,6 +430,20 @@ function cloneContent(content: ContentBlock[]): ContentBlock[] {
 function cloneChunk(chunk: ContextChunk): ContextChunk {
   return {
     ...chunk,
+    decisionCard: chunk.decisionCard
+      ? {
+          ...chunk.decisionCard,
+          evidence: [...chunk.decisionCard.evidence],
+          restoreWhen: [...chunk.decisionCard.restoreWhen],
+          safeToIgnoreWhen: chunk.decisionCard.safeToIgnoreWhen
+            ? [...chunk.decisionCard.safeToIgnoreWhen]
+            : undefined,
+          sourceAnchors: chunk.decisionCard.sourceAnchors
+            ? [...chunk.decisionCard.sourceAnchors]
+            : undefined,
+          hazards: chunk.decisionCard.hazards ? [...chunk.decisionCard.hazards] : undefined,
+        }
+      : undefined,
     source: chunk.source ? { ...chunk.source } : undefined,
   };
 }

@@ -1,3 +1,4 @@
+import { compactDecisionCard } from "./cards";
 import { truncateText } from "./text";
 import type { ContentBlock, ContextChunk, PruneChunksConfig } from "./types";
 
@@ -21,10 +22,7 @@ export function tombstoneFor(
   }
 
   const source = sourceText(chunk);
-  const summary =
-    config.tombstones.includeSummary && chunk.summary
-      ? ` summary="${escapeField(truncateText(chunk.summary, config.tombstones.maxSummaryChars))}"`
-      : "";
+  const card = cardText(chunk, config);
   const restore = config.tombstones.includeRestoreHint
     ? ` restore="restore_chunks({ids:['${chunk.id}']})"`
     : "";
@@ -34,7 +32,7 @@ export function tombstoneFor(
       type: "text",
       text:
         `[pruned:${chunk.id} ${chunk.kind}/${chunk.toolName} "${escapeField(chunk.label)}" ` +
-        `~${chunk.tokenEstimate}t${source}${summary}${restore}]`,
+        `~${chunk.tokenEstimate}t${source}${card}${restore}]`,
     },
   ];
 }
@@ -151,6 +149,19 @@ function coalescedManifest(chunks: ContextChunk[], config: PruneChunksConfig): C
         `${entries}${omittedText}; restore_chunks by id]`,
     },
   ];
+}
+
+function cardText(chunk: ContextChunk, config: PruneChunksConfig): string {
+  if (!config.tombstones.includeSummary) return "";
+  if (chunk.decisionCard) {
+    return ` card="${escapeField(
+      compactDecisionCard(chunk.decisionCard, config.tombstones.maxSummaryChars),
+    )}"`;
+  }
+  if (chunk.summary) {
+    return ` summary="${escapeField(truncateText(chunk.summary, config.tombstones.maxSummaryChars))}"`;
+  }
+  return "";
 }
 
 function sourceText(chunk: ContextChunk): string {
