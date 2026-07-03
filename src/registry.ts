@@ -22,7 +22,8 @@ const RISK_ORDER: Record<string, number> = {
 export class MemoryChunkContentCache implements ChunkContentCache {
   private readonly content = new Map<string, ContentBlock[]>();
 
-  get(id: string): ContentBlock[] | undefined {
+  get(id: string, mode?: "memory" | "disk_cache"): ContentBlock[] | undefined {
+    if (mode === "disk_cache") return undefined;
     return this.content.get(id);
   }
 
@@ -34,7 +35,8 @@ export class MemoryChunkContentCache implements ChunkContentCache {
     this.content.delete(id);
   }
 
-  has(id: string): boolean {
+  has(id: string, mode?: "memory" | "disk_cache"): boolean {
+    if (mode === "disk_cache") return false;
     return this.content.has(id);
   }
 
@@ -68,7 +70,7 @@ export class ChunkRegistry {
     }
 
     const id = this.nextChunkId(collected.toolCallId, collected.toolName, collected.text);
-    const restoreMode = inferRestoreMode(true, collected.source);
+    const restoreMode = inferRestoreMode(true, collected.source, this.cache.has(id, "disk_cache"));
     const chunk: ContextChunk = {
       id,
       toolName: collected.toolName,
@@ -101,8 +103,8 @@ export class ChunkRegistry {
     return this.chunks.get(id);
   }
 
-  getContent(id: string): ContentBlock[] | undefined {
-    return this.cache.get(id);
+  getContent(id: string, mode?: "memory" | "disk_cache"): ContentBlock[] | undefined {
+    return this.cache.get(id, mode);
   }
 
   setContent(id: string, content: ContentBlock[]): void {
@@ -333,7 +335,11 @@ export class ChunkRegistry {
 
     for (const persisted of state.chunks) {
       const chunk = cloneChunk(persisted);
-      const sourceMode = inferRestoreMode(false, chunk.source);
+      const sourceMode = inferRestoreMode(
+        this.cache.has(chunk.id, "memory"),
+        chunk.source,
+        this.cache.has(chunk.id, "disk_cache"),
+      );
       chunk.restoreMode = sourceMode;
       chunk.restoreAvailable = sourceMode !== "unavailable";
       chunk.restoreUnavailableReason =
@@ -379,8 +385,10 @@ export class ChunkRegistry {
 export function inferRestoreMode(
   hasMemory: boolean,
   source?: { path?: string; startLine?: number; endLine?: number },
+  hasDiskCache = false,
 ): RestoreMode {
   if (hasMemory) return "memory";
+  if (hasDiskCache) return "disk_cache";
   if (source?.path && source.startLine != null && source.endLine != null) return "source_rehydrate";
   return "unavailable";
 }
@@ -388,11 +396,12 @@ export function inferRestoreMode(
 export function restoreUnavailableReason(
   hasMemory: boolean,
   source?: { path?: string; startLine?: number; endLine?: number },
+  hasDiskCache = false,
 ): string | undefined {
-  if (hasMemory) return undefined;
-  if (!source?.path) return "no memory content or source path metadata";
+  if (hasMemory || hasDiskCache) return undefined;
+  if (!source?.path) return "no memory content, disk cache, or source path metadata";
   if (source.startLine == null || source.endLine == null) {
-    return "no memory content or source line range metadata";
+    return "no memory content, disk cache, or source line range metadata";
   }
   return undefined;
 }

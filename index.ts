@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { collectToolResult } from "./src/collector";
 import { mergeConfig } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
+import { CompositeChunkContentCache, DiskChunkContentCache } from "./src/diskCache";
 import {
   autoPrune,
   contextPercent,
@@ -14,7 +15,7 @@ import {
   pruneSupersededAfterCollect,
   suggestPruneCandidates,
 } from "./src/pruner";
-import { ChunkRegistry } from "./src/registry";
+import { ChunkRegistry, MemoryChunkContentCache } from "./src/registry";
 import {
   contextFooter,
   renderActionResults,
@@ -37,7 +38,7 @@ const STATE_TYPE = "prune-chunks-state-v1";
 
 export default function (pi: ExtensionAPI) {
   const config = resolveConfig(pi);
-  const registry = new ChunkRegistry();
+  const registry = new ChunkRegistry(createContentCache(config));
 
   function persistState() {
     pi.appendEntry(STATE_TYPE, { state: registry.persistenceState() });
@@ -347,6 +348,15 @@ function registerCommands(
       notify(ctx, renderActionResults("restored", ids, results));
     },
   });
+}
+
+function createContentCache(config: PruneChunksConfig) {
+  const memory = new MemoryChunkContentCache();
+  if (!config.restore.diskCache.enabled) return memory;
+  return new CompositeChunkContentCache(
+    memory,
+    new DiskChunkContentCache(config.restore.diskCache),
+  );
 }
 
 function resolveConfig(pi: ExtensionAPI): PruneChunksConfig {

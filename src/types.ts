@@ -14,6 +14,14 @@ export type ChunkRisk = "low" | "medium" | "high";
 
 export type RestoreMode = "memory" | "disk_cache" | "source_rehydrate" | "unavailable";
 
+export interface DiskCacheConfig {
+  enabled: boolean;
+  directory?: string;
+  maxBytes: number;
+  maxAgeDays: number;
+  maxBlobBytes: number;
+}
+
 export type ContentBlock = {
   type: string;
   text?: string;
@@ -67,10 +75,10 @@ export interface ChunkAuditEvent {
 }
 
 export interface ChunkContentCache {
-  get(id: string): ContentBlock[] | undefined;
+  get(id: string, mode?: "memory" | "disk_cache"): ContentBlock[] | undefined;
   set(id: string, content: ContentBlock[]): void;
   delete(id: string): void;
-  has(id: string): boolean;
+  has(id: string, mode?: "memory" | "disk_cache"): boolean;
   clear(): void;
 }
 
@@ -114,7 +122,7 @@ export type PruneChunksConfig = {
   };
   restore: {
     memory: boolean;
-    diskCache: boolean;
+    diskCache: DiskCacheConfig;
     sourceRehydrate: boolean;
   };
   debug: boolean;

@@ -21,8 +21,13 @@ export async function restoreChunks(
       continue;
     }
 
-    if (config.restore.memory && registry.getContent(id)) {
+    if (config.restore.memory && registry.getContent(id, "memory")) {
       results.push(registry.restore(id, "memory"));
+      continue;
+    }
+
+    if (config.restore.diskCache.enabled && registry.getContent(id, "disk_cache")) {
+      results.push(registry.restore(id, "disk_cache"));
       continue;
     }
 
@@ -46,10 +51,10 @@ export async function restoreChunks(
     }
 
     const reason = config.restore.sourceRehydrate
-      ? restoreUnavailableReason(false, chunk.source)
+      ? restoreUnavailableReason(false, chunk.source, false)
       : canRehydrate
-        ? "no memory content and source rehydrate is disabled"
-        : restoreUnavailableReason(false, chunk.source);
+        ? "no memory/disk content and source rehydrate is disabled"
+        : restoreUnavailableReason(false, chunk.source, false);
     results.push({
       id,
       status: "unavailable",
