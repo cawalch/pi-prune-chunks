@@ -84,7 +84,7 @@ export function renderPressure(
     `Context pressure: ${pct == null ? "unknown" : `${Math.round(pct)}%${providerTokens}`}`,
     `Active chunk tokens: ~${pressure.estimatedActiveChunkTokens}`,
     `Pruned chunk tokens: ~${pressure.estimatedPrunedTokens}`,
-    `Auto-prune: ${pressure.autoPrune.enabled ? "enabled" : "disabled"} start=${pressure.autoPrune.startAtPercent}% target=${pressure.autoPrune.targetPercent}%`,
+    `Auto-prune: ${pressure.autoPrune.enabled ? "enabled" : "disabled"} policy=${pressure.autoPrune.policy} model=${pressure.autoPrune.modelProfile} band=${pressure.autoPrune.pressureBand} start=${pressure.autoPrune.startAtPercent}% target=${pressure.autoPrune.targetPercent}%`,
   ];
 
   if (pressure.autoPrune.nonChunkTokens != null) {
@@ -142,7 +142,7 @@ export function contextFooter(
 
 function renderCandidate(candidate: PruneCandidate): string {
   const reasons = candidate.reasons.length > 0 ? `; ${candidate.reasons.join(", ")}` : "";
-  return `  ${candidate.id}: ${candidate.kind}/${candidate.risk} ~${candidate.tokenEstimate}t ${candidate.label}${reasons}`;
+  return `  ${candidate.id}: ${candidate.kind}/${candidate.risk} ~${candidate.tokenEstimate}t score=${Math.round(candidate.score)} confidence=${candidate.confidence} ${candidate.label}${reasons}`;
 }
 
 function capitalize(text: string): string {

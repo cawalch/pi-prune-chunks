@@ -15,6 +15,8 @@ export type PruneCandidate = {
   risk: string;
   tokenEstimate: number;
   score: number;
+  confidence: "low" | "medium" | "high";
+  policy: "heuristic-v1" | "adaptive-v1";
   reasons: string[];
 };
 
@@ -45,6 +47,16 @@ export type ReamerxTerminalPruneResult = {
   savedTokens: number;
 };
 
+type PressureBand = "normal" | "high" | "extreme";
+
+type TaskPhase = "exploration" | "editing" | "verification";
+
+type SessionSignals = {
+  pressureBand: PressureBand;
+  taskPhase: TaskPhase;
+  modelProfile: "auto" | "local-32k" | "cloud-1m";
+};
+
 export function contextPercent(usage?: ContextUsage | null): number | null {
   if (!usage) return null;
   if (usage.percent != null) return usage.percent;
@@ -66,6 +78,7 @@ export function suggestPruneCandidates(
 ): PruneCandidate[] {
   const now = options.now ?? Date.now();
   const active = registry.active();
+  const signals = inferSessionSignals(active, config, options.pressurePercent);
   const recentProtected = recentChunkIds(
     active,
     protectedRecentChunkCount(config, options.pressurePercent),
@@ -84,7 +97,7 @@ export function suggestPruneCandidates(
       options.pressurePercent,
     );
     if (blockedReason) continue;
-    candidates.push(scoreCandidate(chunk, now, duplicateHashes));
+    candidates.push(scoreCandidate(chunk, now, duplicateHashes, config, signals));
   }
 
   candidates.sort((a, b) => b.score - a.score || b.tokenEstimate - a.tokenEstimate);
@@ -225,6 +238,9 @@ export function pressureSummary(
   largestUnprunedChunks: PruneCandidate[];
   autoPrune: {
     enabled: boolean;
+    policy: "heuristic-v1" | "adaptive-v1";
+    modelProfile: "auto" | "local-32k" | "cloud-1m";
+    pressureBand: PressureBand;
     currentPercent: number | null;
     startAtPercent: number;
     targetPercent: number;
@@ -257,11 +273,16 @@ export function pressureSummary(
         risk: chunk.risk,
         tokenEstimate: chunk.tokenEstimate,
         score: chunk.tokenEstimate,
+        confidence: "low",
+        policy: config.autoPrune.policy,
         reasons: ["largest active chunk"],
       })),
     autoPrune: {
       enabled: config.autoPrune.enabled,
       currentPercent: contextPercent(usage),
+      policy: config.autoPrune.policy,
+      modelProfile: config.autoPrune.modelProfile,
+      pressureBand: pressureBand(pct, config),
       startAtPercent: config.autoPrune.startAtPercent,
       targetPercent: config.autoPrune.targetPercent,
       minChunkTokens: config.autoPrune.minChunkTokens,
@@ -333,6 +354,19 @@ function autoPruneBlockedReason(
   preserve?: PreserveContext,
   pressurePercent?: number | null,
 ): string | null {
+  return config.autoPrune.policy === "adaptive-v1"
+    ? adaptiveBlockedReason(chunk, config, now, recentProtected, preserve, pressurePercent)
+    : heuristicBlockedReason(chunk, config, now, recentProtected, preserve, pressurePercent);
+}
+
+function heuristicBlockedReason(
+  chunk: ContextChunk,
+  config: PruneChunksConfig,
+  now: number,
+  recentProtected: Set<string>,
+  preserve?: PreserveContext,
+  pressurePercent?: number | null,
+): string | null {
   const relaxedForPressure =
     pressurePercent != null && pressurePercent >= config.autoPrune.startAtPercent + 5;
   const minChunkTokens = relaxedForPressure
@@ -363,6 +397,60 @@ function autoPruneBlockedReason(
   return null;
 }
 
+function adaptiveBlockedReason(
+  chunk: ContextChunk,
+  config: PruneChunksConfig,
+  now: number,
+  recentProtected: Set<string>,
+  preserve?: PreserveContext,
+  pressurePercent?: number | null,
+): string | null {
+  const modelProfile = config.autoPrune.modelProfile;
+  const band = pressureBand(pressurePercent, config);
+  const start = config.autoPrune.startAtPercent;
+  const preserveMs = config.autoPrune.preserveRecentMinutes * 60 * 1000;
+  const relaxedForPressure = band !== "normal";
+  const minChunkTokens = adaptiveMinChunkTokens(config, band);
+
+  if (chunk.pruned) return "already pruned";
+  if (chunk.pinned) return "pinned";
+  if (chunk.risk === "high") return "high risk";
+  if (chunk.lastSeenAt == null) return "not yet seen in model context";
+  if (isPathPreserved(chunk, preserve?.paths)) return "referenced by active working context";
+  if (preserve?.ids?.has(chunk.id)) return "referenced by latest assistant message";
+  if (chunk.tokenEstimate < minChunkTokens) return "below adaptive token floor";
+  if (recentProtected.has(chunk.id)) return "recent protected chunk";
+
+  if (
+    chunk.kind === "file_read" &&
+    chunk.risk === "medium" &&
+    chunk.source?.path &&
+    (pressurePercent == null || pressurePercent < unboundedReadPressureFloor(modelProfile, start))
+  ) {
+    return "unbounded file read below adaptive pressure threshold";
+  }
+
+  if (
+    preserveMs > 0 &&
+    chunk.lastRestoredAt != null &&
+    now - chunk.lastRestoredAt < preserveMs * 2
+  ) {
+    return "restored recently";
+  }
+  if (!relaxedForPressure && preserveMs > 0 && now - chunk.createdAt < preserveMs) {
+    return "created recently";
+  }
+  if (
+    modelProfile === "cloud-1m" &&
+    band !== "extreme" &&
+    chunk.restoreCount &&
+    chunk.restoreCount > 1
+  ) {
+    return "frequently restored on large-window profile";
+  }
+  return null;
+}
+
 function isPathPreserved(chunk: ContextChunk, preservedPaths: Set<string> | undefined): boolean {
   if (!chunk.source?.path || !preservedPaths || preservedPaths.size === 0) return false;
   const chunkPath = normalizePath(chunk.source.path);
@@ -379,6 +467,23 @@ function normalizePath(path: string): string {
 }
 
 function scoreCandidate(
+  chunk: ContextChunk,
+  now: number,
+  duplicateHashes: Set<string> = new Set(),
+  config?: PruneChunksConfig,
+  signals?: SessionSignals,
+): PruneCandidate {
+  const policy = config?.autoPrune.policy ?? "heuristic-v1";
+  const heuristic = scoreCandidateHeuristic(chunk, now, duplicateHashes);
+  if (policy !== "adaptive-v1") return heuristic;
+  return scoreCandidateAdaptive(
+    chunk,
+    heuristic,
+    signals ?? inferSessionSignals([chunk], config, null),
+  );
+}
+
+function scoreCandidateHeuristic(
   chunk: ContextChunk,
   now: number,
   duplicateHashes: Set<string> = new Set(),
@@ -426,8 +531,157 @@ function scoreCandidate(
     risk: chunk.risk,
     tokenEstimate: chunk.tokenEstimate,
     score,
+    confidence: candidateConfidence(score, chunk.tokenEstimate, reasons),
+    policy: "heuristic-v1",
     reasons,
   };
+}
+
+function scoreCandidateAdaptive(
+  chunk: ContextChunk,
+  heuristic: PruneCandidate,
+  signals: SessionSignals,
+): PruneCandidate {
+  const reasons = [...heuristic.reasons];
+  let score = heuristic.score;
+
+  switch (chunk.restoreMode) {
+    case "memory":
+      score += 350;
+      reasons.push("restore cost: memory");
+      break;
+    case "disk_cache":
+      score += 250;
+      reasons.push("restore cost: disk cache");
+      break;
+    case "source_rehydrate":
+      score += 100;
+      reasons.push("restore cost: source rehydrate");
+      break;
+    case "unavailable":
+      score -= 500;
+      reasons.push("restore unavailable");
+      break;
+  }
+
+  if (signals.pressureBand === "high") {
+    score += 200;
+    reasons.push("high pressure");
+  } else if (signals.pressureBand === "extreme") {
+    score += 600;
+    reasons.push("extreme pressure");
+  }
+
+  if (signals.modelProfile === "local-32k") {
+    score += Math.round(chunk.tokenEstimate * 0.25);
+    reasons.push("local-32k tighter window");
+  } else if (signals.modelProfile === "cloud-1m") {
+    score -= 300;
+    reasons.push("cloud-1m preserves more context");
+  }
+
+  if (
+    signals.taskPhase === "verification" &&
+    ["search", "flow_trace", "outline", "symbol"].includes(chunk.kind)
+  ) {
+    score += 250;
+    reasons.push("pre-verification exploration");
+  } else if (signals.taskPhase === "verification" && chunk.kind === "test_output") {
+    score -= 250;
+    reasons.push("verification evidence");
+  } else if (
+    signals.taskPhase === "editing" &&
+    ["search", "outline", "flow_trace"].includes(chunk.kind)
+  ) {
+    score += 150;
+    reasons.push("exploration superseded by editing");
+  }
+
+  if (chunk.kind === "file_read" && chunk.source?.path && chunk.risk === "medium") {
+    score -= 150;
+    reasons.push("source anchor");
+  }
+  if (chunk.restoreCount && chunk.restoreCount > 0) {
+    score -= Math.min(900, 300 * chunk.restoreCount);
+    reasons.push(`restored ${chunk.restoreCount}x before`);
+  }
+
+  return {
+    ...heuristic,
+    score,
+    confidence: candidateConfidence(score, chunk.tokenEstimate, reasons),
+    policy: "adaptive-v1",
+    reasons,
+  };
+}
+
+function inferSessionSignals(
+  active: ContextChunk[],
+  config: PruneChunksConfig,
+  pressurePercent?: number | null,
+): SessionSignals {
+  const recent = [...active]
+    .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt)
+    .slice(0, 6);
+  return {
+    pressureBand: pressureBand(pressurePercent, config),
+    taskPhase: inferTaskPhase(recent),
+    modelProfile: config.autoPrune.modelProfile,
+  };
+}
+
+function inferTaskPhase(recent: ContextChunk[]): TaskPhase {
+  if (recent.some((chunk) => chunk.kind === "test_output")) return "verification";
+  if (
+    recent.some(
+      (chunk) => chunk.kind === "diff" || (chunk.kind === "file_read" && chunk.source?.path),
+    )
+  ) {
+    return "editing";
+  }
+  return "exploration";
+}
+
+function pressureBand(
+  pressurePercent: number | null | undefined,
+  config: PruneChunksConfig,
+): PressureBand {
+  if (pressurePercent == null) return "normal";
+  if (pressurePercent >= config.tombstones.coalesceAtPercent) return "extreme";
+  if (pressurePercent >= config.autoPrune.startAtPercent + 10) return "high";
+  return "normal";
+}
+
+function adaptiveMinChunkTokens(config: PruneChunksConfig, band: PressureBand): number {
+  if (band === "extreme")
+    return Math.min(config.track.minChunkTokens, config.autoPrune.minChunkTokens);
+  if (config.autoPrune.modelProfile === "local-32k" && band === "high") {
+    return Math.min(config.track.minChunkTokens, config.autoPrune.minChunkTokens);
+  }
+  if (config.autoPrune.modelProfile === "cloud-1m" && band === "normal") {
+    return Math.max(config.autoPrune.minChunkTokens, config.track.minChunkTokens * 2);
+  }
+  return config.autoPrune.minChunkTokens;
+}
+
+function unboundedReadPressureFloor(
+  modelProfile: "auto" | "local-32k" | "cloud-1m",
+  startAtPercent: number,
+): number {
+  if (modelProfile === "local-32k") return startAtPercent + 10;
+  if (modelProfile === "cloud-1m") return startAtPercent + 20;
+  return startAtPercent + 15;
+}
+
+function candidateConfidence(
+  score: number,
+  tokenEstimate: number,
+  reasons: string[],
+): "low" | "medium" | "high" {
+  const lift = score - tokenEstimate;
+  if (lift >= 900 || reasons.length >= 5) return "high";
+  if (lift >= 350 || reasons.length >= 3) return "medium";
+  return "low";
 }
 
 function supersededReason(previous: ContextChunk, current: ContextChunk): string | null {
@@ -506,6 +760,16 @@ function protectedRecentChunkCount(
 ): number {
   const configured = Math.max(0, config.autoPrune.preserveRecentChunks);
   if (pressurePercent == null) return configured;
+  if (config.autoPrune.policy === "adaptive-v1") {
+    if (config.autoPrune.modelProfile === "local-32k") {
+      if (pressurePercent >= config.autoPrune.startAtPercent + 5) return 0;
+      return Math.min(configured, 2);
+    }
+    if (config.autoPrune.modelProfile === "cloud-1m") {
+      if (pressurePercent >= config.autoPrune.startAtPercent + 20) return Math.min(configured, 2);
+      return configured + 2;
+    }
+  }
   if (pressurePercent >= config.autoPrune.startAtPercent + 10) return 0;
   if (pressurePercent >= config.autoPrune.startAtPercent + 3) return Math.min(configured, 2);
   return configured;

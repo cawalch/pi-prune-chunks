@@ -1,4 +1,9 @@
-import type { DiskCacheConfig, PruneChunksConfig } from "./types";
+import type {
+  AutoPrunePolicyMode,
+  DiskCacheConfig,
+  ModelProfile,
+  PruneChunksConfig,
+} from "./types";
 
 export const DEFAULT_DISK_CACHE_CONFIG: DiskCacheConfig = {
   enabled: false,
@@ -15,6 +20,8 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
   },
   autoPrune: {
     enabled: true,
+    policy: "heuristic-v1",
+    modelProfile: "auto",
     startAtPercent: 70,
     targetPercent: 55,
     preserveRecentChunks: 5,
@@ -48,7 +55,8 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
 };
 
 type RawDiskCacheConfig = boolean | Partial<DiskCacheConfig> | undefined;
-type RawPruneChunksConfig = Partial<Omit<PruneChunksConfig, "restore">> & {
+type RawPruneChunksConfig = Partial<Omit<PruneChunksConfig, "autoPrune" | "restore">> & {
+  autoPrune?: Partial<PruneChunksConfig["autoPrune"]>;
   restore?: Partial<Omit<PruneChunksConfig["restore"], "diskCache">> & {
     diskCache?: RawDiskCacheConfig;
   };
@@ -65,6 +73,8 @@ export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksCon
     },
     autoPrune: {
       enabled: input.autoPrune?.enabled ?? DEFAULT_CONFIG.autoPrune.enabled,
+      policy: normalizePolicy(input.autoPrune?.policy),
+      modelProfile: normalizeModelProfile(input.autoPrune?.modelProfile),
       startAtPercent: input.autoPrune?.startAtPercent ?? DEFAULT_CONFIG.autoPrune.startAtPercent,
       targetPercent: input.autoPrune?.targetPercent ?? DEFAULT_CONFIG.autoPrune.targetPercent,
       preserveRecentChunks:
@@ -114,6 +124,18 @@ export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksCon
     },
     debug: input.debug ?? DEFAULT_CONFIG.debug,
   };
+}
+
+function normalizePolicy(input: unknown): AutoPrunePolicyMode {
+  return input === "adaptive-v1" || input === "heuristic-v1"
+    ? input
+    : DEFAULT_CONFIG.autoPrune.policy;
+}
+
+function normalizeModelProfile(input: unknown): ModelProfile {
+  return input === "local-32k" || input === "cloud-1m" || input === "auto"
+    ? input
+    : DEFAULT_CONFIG.autoPrune.modelProfile;
 }
 
 function mergeDiskCacheConfig(input: RawDiskCacheConfig): DiskCacheConfig {

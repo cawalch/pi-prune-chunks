@@ -113,6 +113,8 @@ Pi may provide extension config under `pruneChunks`:
     "track": { "minChunkTokens": 200 },
     "autoPrune": {
       "enabled": true,
+      "policy": "heuristic-v1",
+      "modelProfile": "auto",
       "startAtPercent": 70,
       "targetPercent": 55,
       "preserveRecentChunks": 5,
@@ -184,6 +186,10 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
   evidence (`edit_pack`, `slice`, or `changes`) is acquired, while the terminal
   evidence remains active.
 - Exact duplicate tool outputs are scored higher as prune candidates.
+- Adaptive policy mode: `autoPrune.policy: "adaptive-v1"` adds deterministic
+  restore-cost, pressure-band, task-phase, model-profile, and restore-history
+  scoring. `modelProfile: "local-32k"` prunes more aggressively than
+  `"cloud-1m"`; `"heuristic-v1"` remains the default compatibility mode.
 - Scope boundary: this extension prunes tracked tool-result chunks, not system
   prompts or ordinary conversation history. If non-chunk overhead dominates,
   conversation-level compression is a separate mechanism.

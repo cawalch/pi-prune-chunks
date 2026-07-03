@@ -187,6 +187,7 @@ export class ChunkRegistry {
         source: chunk.source,
         createdAt: chunk.createdAt,
         lastRestoredAt: chunk.lastRestoredAt,
+        restoreCount: chunk.restoreCount,
       })),
     };
   }
@@ -253,6 +254,7 @@ export class ChunkRegistry {
     chunk.restoreAvailable = true;
     chunk.restoreUnavailableReason = undefined;
     chunk.lastRestoredAt = now;
+    chunk.restoreCount = (chunk.restoreCount ?? 0) + 1;
     chunk.updatedAt = now;
     this.audit(id, mode === "source_rehydrate" ? "rehydrated" : "restored", undefined, now);
     return { id, status: "restored", tokens: chunk.tokenEstimate, restoreMode: mode };
