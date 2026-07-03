@@ -362,7 +362,7 @@ function registerCommands(
 ): void {
   pi.registerCommand("prune-status", {
     description: "Show context chunk tracking and pruning status",
-    async run(_args, ctx) {
+    async handler(_args, ctx) {
       const usage = getUsage(ctx);
       const preserve = preserveContext([], ctx);
       const prep = prepareContinuationManifest(registry, usage, config, preserve);
@@ -381,7 +381,7 @@ function registerCommands(
 
   pi.registerCommand("prune-profile", {
     description: "Show or switch the active prune policy profile for this live session",
-    async run(args, ctx) {
+    async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const requested = idsFromCommandArgs(parsed)[0];
       if (!requested || requested === "show" || requested === "list") {
@@ -410,7 +410,7 @@ function registerCommands(
 
   pi.registerCommand("prune-largest", {
     description: "Show largest unpruned chunks",
-    async run(args, ctx) {
+    async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
       const kind = kindOrUndefined(stringOption(parsed, "--kind"));
@@ -422,7 +422,7 @@ function registerCommands(
 
   pi.registerCommand("prune-suggest", {
     description: "Show safe auto-prune candidates without pruning",
-    async run(args, ctx) {
+    async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
       notify(
@@ -439,7 +439,7 @@ function registerCommands(
 
   pi.registerCommand("prune-report", {
     description: "Write a Markdown telemetry report for pruning activity",
-    async run(args, ctx) {
+    async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const output = stringOption(parsed, "--output") ?? "prune-report.md";
       const report = renderTelemetryReport(
@@ -453,7 +453,7 @@ function registerCommands(
 
   pi.registerCommand("prune-now", {
     description: "Apply safe auto-pruning immediately",
-    async run(args, ctx) {
+    async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const dryRun = parsed.includes("--dry-run");
       const target = numberOption(parsed, "--target");
@@ -485,7 +485,7 @@ function registerCommands(
 
   pi.registerCommand("prune-restore", {
     description: "Restore pruned chunks by ID",
-    async run(args, ctx) {
+    async handler(args, ctx) {
       const ids = idsFromCommandArgs(parseCommandArgs(args));
       if (ids.length === 0) {
         notify(ctx, "Usage: /prune-restore <id> [id...]");

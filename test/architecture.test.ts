@@ -1914,7 +1914,10 @@ function createMockPi(config: PruneChunksConfig) {
       tools[definition.name] = definition;
     },
     registerCommand(name: string, definition: any) {
-      commands[name] = definition;
+      commands[name] = {
+        ...definition,
+        run: definition.run ?? definition.handler,
+      };
     },
     appendEntry(customType: string, data?: any) {
       entries.push({ type: "custom", customType, data });
