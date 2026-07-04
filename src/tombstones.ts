@@ -47,8 +47,13 @@ export function applyPrunedTombstones<
   options: TombstoneOptions = {},
   getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
 ): { messages: T[]; modified: boolean; coalesced?: boolean; coalescedCount?: number } {
-  if (options.coalesce && !hasPrunedParts(messages, getPrunedParts)) {
-    return applyCoalescedPrunedTombstones(messages, getPrunedChunk, config, options);
+  const prunedPartsPresent = hasPrunedParts(messages, getPrunedParts);
+  if (!prunedPartsPresent) {
+    const pruned = prunedMessages(messages, getPrunedChunk);
+    const minCoalescedChunks = Math.max(2, config.tombstones.coalesceMinChunks);
+    if (options.coalesce || pruned.length >= minCoalescedChunks) {
+      return applyCoalescedPrunedTombstones(messages, getPrunedChunk, config, options, pruned);
+    }
   }
 
   let modified = false;
@@ -83,8 +88,8 @@ function applyCoalescedPrunedTombstones<
   getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
   config: PruneChunksConfig,
   options: TombstoneOptions,
+  pruned = prunedMessages(messages, getPrunedChunk),
 ): { messages: T[]; modified: boolean; coalesced?: boolean; coalescedCount?: number } {
-  const pruned = prunedMessages(messages, getPrunedChunk);
   if (pruned.length <= 1) {
     return applyPrunedTombstones(
       messages,

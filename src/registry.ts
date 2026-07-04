@@ -305,9 +305,19 @@ export class ChunkRegistry {
     prunedTokens: number;
     activeByKind: Record<ChunkKind, { count: number; tokens: number }>;
     activeByTool: Record<string, { count: number; tokens: number }>;
+    prunedByKind: Record<ChunkKind, { count: number; tokens: number }>;
+    prunedByTool: Record<string, { count: number; tokens: number }>;
+    restoreByMode: Record<RestoreMode, { count: number; tokens: number }>;
+    unavailableByKind: Record<ChunkKind, { count: number; tokens: number }>;
+    unavailableByTool: Record<string, { count: number; tokens: number }>;
   } {
     const activeByKind = {} as Record<ChunkKind, { count: number; tokens: number }>;
     const activeByTool: Record<string, { count: number; tokens: number }> = {};
+    const prunedByKind = {} as Record<ChunkKind, { count: number; tokens: number }>;
+    const prunedByTool: Record<string, { count: number; tokens: number }> = {};
+    const restoreByMode = emptyRestoreBuckets();
+    const unavailableByKind = {} as Record<ChunkKind, { count: number; tokens: number }>;
+    const unavailableByTool: Record<string, { count: number; tokens: number }> = {};
     let prunedChunks = 0;
     let pinnedChunks = 0;
     let totalTokens = 0;
@@ -315,22 +325,22 @@ export class ChunkRegistry {
 
     for (const chunk of this.chunks.values()) {
       totalTokens += chunk.tokenEstimate;
+      incrementBucket(restoreByMode, chunk.restoreMode, chunk.tokenEstimate);
+      if (!chunk.restoreAvailable) {
+        incrementBucket(unavailableByKind, chunk.kind, chunk.tokenEstimate);
+        incrementBucket(unavailableByTool, chunk.toolName, chunk.tokenEstimate);
+      }
       if (chunk.pinned) pinnedChunks++;
       if (chunk.pruned) {
         prunedChunks++;
         prunedTokens += chunk.tokenEstimate;
+        incrementBucket(prunedByKind, chunk.kind, chunk.tokenEstimate);
+        incrementBucket(prunedByTool, chunk.toolName, chunk.tokenEstimate);
         continue;
       }
 
-      const kindBucket = activeByKind[chunk.kind] ?? { count: 0, tokens: 0 };
-      kindBucket.count++;
-      kindBucket.tokens += chunk.tokenEstimate;
-      activeByKind[chunk.kind] = kindBucket;
-
-      const toolBucket = activeByTool[chunk.toolName] ?? { count: 0, tokens: 0 };
-      toolBucket.count++;
-      toolBucket.tokens += chunk.tokenEstimate;
-      activeByTool[chunk.toolName] = toolBucket;
+      incrementBucket(activeByKind, chunk.kind, chunk.tokenEstimate);
+      incrementBucket(activeByTool, chunk.toolName, chunk.tokenEstimate);
     }
 
     return {
@@ -342,6 +352,11 @@ export class ChunkRegistry {
       prunedTokens,
       activeByKind,
       activeByTool,
+      prunedByKind,
+      prunedByTool,
+      restoreByMode,
+      unavailableByKind,
+      unavailableByTool,
     };
   }
 
@@ -532,6 +547,26 @@ function cloneChunk(chunk: ContextChunk): ContextChunk {
       : undefined,
     source: chunk.source ? { ...chunk.source } : undefined,
     scope: chunk.scope ? { ...chunk.scope } : undefined,
+  };
+}
+
+function incrementBucket<K extends string>(
+  buckets: Record<K, { count: number; tokens: number }>,
+  key: K,
+  tokens: number,
+): void {
+  const bucket = buckets[key] ?? { count: 0, tokens: 0 };
+  bucket.count++;
+  bucket.tokens += tokens;
+  buckets[key] = bucket;
+}
+
+function emptyRestoreBuckets(): Record<RestoreMode, { count: number; tokens: number }> {
+  return {
+    memory: { count: 0, tokens: 0 },
+    disk_cache: { count: 0, tokens: 0 },
+    source_rehydrate: { count: 0, tokens: 0 },
+    unavailable: { count: 0, tokens: 0 },
   };
 }
 

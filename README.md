@@ -141,6 +141,7 @@ Pi may provide extension config under `pruneChunks`:
       "maxSummaryChars": 180,
       "compactAtPercent": 90,
       "coalesceAtPercent": 98,
+      "coalesceMinChunks": 16,
       "maxCoalescedEntries": 120
     },
     "contextGuards": {
@@ -150,7 +151,7 @@ Pi may provide extension config under `pruneChunks`:
     "restore": {
       "memory": true,
       "diskCache": {
-        "enabled": false,
+        "enabled": true,
         "directory": "~/.pi/prune-chunks/cache",
         "maxBytes": 262144000,
         "maxAgeDays": 14,
@@ -165,7 +166,7 @@ Pi may provide extension config under `pruneChunks`:
 
 Profiles apply named defaults before explicit config overrides. Available profiles are `local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`, `privacy-max`, `research-heavy`, `coding-heavy`, and `debug-failures`. For example, `"profile": "local-32k"` lowers prune thresholds and compacts tombstones earlier, while `"profile": "cloud-1m"` preserves more recent evidence and prunes mostly for latency/noise. Any explicit field such as `autoPrune.targetPercent` overrides the selected profile. Use `/prune-profile <name>` to switch profiles for the current live session without reloading; the live override is stored in extension state for the session lineage.
 
-Raw tool output is not persisted to disk by default. For backward-compatible config, `"diskCache": true` is accepted and expands to the default durable-cache settings.
+Raw tool output is persisted to the local durable disk cache by default for non-privacy profiles so non-file chunks can be restored after Pi restarts. Use `"profile": "privacy-max"` or `"restore": { "diskCache": false }` to keep raw tool output memory-only. For backward-compatible config, `"diskCache": true` is accepted and expands to the default durable-cache settings.
 
 ## Safety Model
 
@@ -204,8 +205,8 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
   than `"cloud-1m"`; `"heuristic-v1"` remains available for conservative
   compatibility.
 - Telemetry reports: `context_report` or `/prune-report` summarize collected,
-  pruned, restored, coalesced, and tombstoned tokens without storing raw tool
-  output in telemetry.
+  pruned, restored, restore availability, pruned-token buckets, coalesced, and
+  tombstoned tokens without storing raw tool output in telemetry.
 - Continuation manifest: near the compact tombstone pressure band, the extension
   pins carry-forward evidence such as failures, diffs, and modified-path chunks,
   then exposes a raw-output-free manifest of active IDs, pruned restore hints,
@@ -229,10 +230,11 @@ Raw tool output is not persisted to disk by default. For backward-compatible con
 - High-pressure tombstones: once provider context reaches the compact threshold,
   tombstones shrink to ID/kind/token markers to avoid tombstone overhead causing
   compaction or provider-window failures.
-- Extreme-pressure coalescing: once context is over the coalesce threshold, old
-  pruned tool-result tombstones are collapsed into a small manifest message with
-  restore IDs instead of preserving one provider message per pruned chunk. The
-  saved transcript remains unchanged.
+- Tombstone coalescing: once context is over the coalesce threshold, or once many
+  pruned tombstones accumulate (`coalesceMinChunks`), old pruned tool-result
+  tombstones are collapsed into a small manifest message with restore IDs instead
+  of preserving one provider message per pruned chunk. The saved transcript
+  remains unchanged.
 - Failed-tool validation guard: oversized validation errors that echo full tool
   arguments are compacted in provider context, preserving the schema error and
   omitting the raw `Received arguments` payload.

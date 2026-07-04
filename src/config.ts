@@ -7,7 +7,7 @@ import type {
 } from "./types";
 
 export const DEFAULT_DISK_CACHE_CONFIG: DiskCacheConfig = {
-  enabled: false,
+  enabled: true,
   maxBytes: 250 * 1024 * 1024,
   maxAgeDays: 14,
   maxBlobBytes: 25 * 1024 * 1024,
@@ -42,6 +42,7 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     maxSummaryChars: 180,
     compactAtPercent: 90,
     coalesceAtPercent: 98,
+    coalesceMinChunks: 16,
     maxCoalescedEntries: 120,
   },
   contextGuards: {
@@ -106,6 +107,7 @@ export const POLICY_PROFILES: Record<
       maxSummaryChars: 120,
       compactAtPercent: 80,
       coalesceAtPercent: 92,
+      coalesceMinChunks: 8,
     },
   },
   "local-64k": {
@@ -125,6 +127,7 @@ export const POLICY_PROFILES: Record<
       maxSummaryChars: 150,
       compactAtPercent: 86,
       coalesceAtPercent: 96,
+      coalesceMinChunks: 12,
     },
   },
   "cloud-200k": {
@@ -138,7 +141,12 @@ export const POLICY_PROFILES: Record<
       minChunkTokens: 500,
       maxChunksPerPass: 8,
     },
-    tombstones: { ...DEFAULT_CONFIG.tombstones, maxSummaryChars: 220, compactAtPercent: 92 },
+    tombstones: {
+      ...DEFAULT_CONFIG.tombstones,
+      maxSummaryChars: 220,
+      compactAtPercent: 92,
+      coalesceMinChunks: 24,
+    },
   },
   "cloud-1m": {
     autoPrune: {
@@ -173,6 +181,7 @@ export const POLICY_PROFILES: Record<
       includeSummary: false,
       maxSummaryChars: 80,
       compactAtPercent: 82,
+      coalesceMinChunks: 8,
     },
     restore: {
       ...DEFAULT_CONFIG.restore,
@@ -189,7 +198,12 @@ export const POLICY_PROFILES: Record<
       minChunkTokens: 500,
       maxChunksPerPass: 8,
     },
-    tombstones: { ...DEFAULT_CONFIG.tombstones, maxSummaryChars: 320, compactAtPercent: 94 },
+    tombstones: {
+      ...DEFAULT_CONFIG.tombstones,
+      maxSummaryChars: 320,
+      compactAtPercent: 94,
+      coalesceMinChunks: 24,
+    },
   },
   "coding-heavy": {},
   "debug-failures": {
@@ -201,7 +215,7 @@ export const POLICY_PROFILES: Record<
       preserveRecentMinutes: 10,
       maxChunksPerPass: 6,
     },
-    tombstones: { ...DEFAULT_CONFIG.tombstones, maxSummaryChars: 240 },
+    tombstones: { ...DEFAULT_CONFIG.tombstones, maxSummaryChars: 240, coalesceMinChunks: 24 },
   },
 };
 
@@ -257,6 +271,7 @@ function mergeWithBase(
       maxSummaryChars: input.tombstones?.maxSummaryChars ?? base.tombstones.maxSummaryChars,
       compactAtPercent: input.tombstones?.compactAtPercent ?? base.tombstones.compactAtPercent,
       coalesceAtPercent: input.tombstones?.coalesceAtPercent ?? base.tombstones.coalesceAtPercent,
+      coalesceMinChunks: input.tombstones?.coalesceMinChunks ?? base.tombstones.coalesceMinChunks,
       maxCoalescedEntries:
         input.tombstones?.maxCoalescedEntries ?? base.tombstones.maxCoalescedEntries,
     },

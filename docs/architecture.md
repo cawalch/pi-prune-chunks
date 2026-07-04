@@ -30,10 +30,10 @@ The extension entry point wires these layers into Pi hooks:
   `restore_chunks` tool.
 
 The saved transcript remains the source of truth. Pruning state is metadata over
-that transcript, not a destructive transcript edit. By default raw content stays
-memory-only; setting `restore.diskCache.enabled` (or legacy `restore.diskCache:
-true`) adds a compressed content-addressed blob cache for exact restore after a
-Pi process restart.
+that transcript, not a destructive transcript edit. Non-privacy profiles enable a
+compressed content-addressed blob cache by default for exact restore after a Pi
+process restart; use `profile: "privacy-max"` or `restore.diskCache.enabled:
+false` for memory-only raw content.
 
 Large collected chunks can create child part chunks such as `#bulk`. The parent
 keeps the exact full content for full restore, while child chunks let the pruner

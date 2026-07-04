@@ -23,6 +23,11 @@ export type TelemetrySnapshot = {
     prunedTokens: number;
     activeByKind: Record<string, { count: number; tokens: number }>;
     activeByTool: Record<string, { count: number; tokens: number }>;
+    prunedByKind?: Record<string, { count: number; tokens: number }>;
+    prunedByTool?: Record<string, { count: number; tokens: number }>;
+    restoreByMode?: Record<string, { count: number; tokens: number }>;
+    unavailableByKind?: Record<string, { count: number; tokens: number }>;
+    unavailableByTool?: Record<string, { count: number; tokens: number }>;
   };
   metrics: TelemetryMetrics;
 };
@@ -259,6 +264,10 @@ export function renderTelemetryReport(snapshot: TelemetrySnapshot): string {
           usage.percent ?? (usage.tokens / usage.contextWindow) * 100,
         )}%)`
       : "unknown";
+  const tombstoneAverage =
+    snapshot.metrics.tombstoneEvents === 0
+      ? 0
+      : Math.round(snapshot.metrics.tombstoneTokens / snapshot.metrics.tombstoneEvents);
   const lines = [
     "# Prune Chunks Telemetry Report",
     "",
@@ -286,16 +295,32 @@ export function renderTelemetryReport(snapshot: TelemetrySnapshot): string {
     `- Restore modes: memory=${snapshot.metrics.restoreByMode.memory}, disk=${snapshot.metrics.restoreByMode.disk_cache}, source=${snapshot.metrics.restoreByMode.source_rehydrate}, unavailable=${snapshot.metrics.unavailableRestores}`,
     `- Restored after auto-prune: ${snapshot.metrics.falsePositiveAutoPrunes}`,
     `- Pins/unpins: ${snapshot.metrics.pins}/${snapshot.metrics.unpins}`,
-    `- Tombstone overhead observed: ~${snapshot.metrics.tombstoneTokens}t across ${snapshot.metrics.tombstoneEvents} context rewrites`,
+    `- Tombstone overhead observed: ~${snapshot.metrics.tombstoneTokens}t across ${snapshot.metrics.tombstoneEvents} context rewrites (~${tombstoneAverage}t avg)`,
     `- Coalescing events: ${snapshot.metrics.coalescingEvents} (${snapshot.metrics.coalescedChunks} chunks coalesced)`,
+    "",
+    "## Restore availability",
+    "",
+    ...renderBuckets(snapshot.chunks.restoreByMode ?? {}),
     "",
     "## Active tokens by kind",
     "",
     ...renderBuckets(snapshot.chunks.activeByKind),
     "",
+    "## Pruned tokens by kind",
+    "",
+    ...renderBuckets(snapshot.chunks.prunedByKind ?? {}),
+    "",
     "## Active tokens by tool",
     "",
     ...renderBuckets(snapshot.chunks.activeByTool),
+    "",
+    "## Pruned tokens by tool",
+    "",
+    ...renderBuckets(snapshot.chunks.prunedByTool ?? {}),
+    "",
+    "## Unavailable restore tokens by tool",
+    "",
+    ...renderBuckets(snapshot.chunks.unavailableByTool ?? {}),
     "",
     "Raw tool output is not included in telemetry.",
   ];
@@ -317,7 +342,9 @@ export function telemetryTombstoneTokens(
 }
 
 function renderBuckets(buckets: Record<string, { count: number; tokens: number }>): string[] {
-  const entries = Object.entries(buckets).sort((a, b) => b[1].tokens - a[1].tokens);
+  const entries = Object.entries(buckets)
+    .filter(([, bucket]) => bucket.count > 0 || bucket.tokens > 0)
+    .sort((a, b) => b[1].tokens - a[1].tokens);
   if (entries.length === 0) return ["- none"];
   return entries.map(([name, bucket]) => `- ${name}: ${bucket.count} chunks, ~${bucket.tokens}t`);
 }

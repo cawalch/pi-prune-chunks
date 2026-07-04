@@ -58,6 +58,7 @@ function testConfig(overrides?: Parameters<typeof mergeConfig>[0]): PruneChunksC
       maxSummaryChars: 80,
       compactAtPercent: 90,
       coalesceAtPercent: 110,
+      coalesceMinChunks: 16,
       maxCoalescedEntries: 120,
     },
     ...overrides,
@@ -269,6 +270,8 @@ describe("collector", () => {
     assert.equal(local.autoPrune.modelProfile, "local-32k");
     assert.equal(local.autoPrune.startAtPercent, 55);
     assert.equal(local.tombstones.compactAtPercent, 80);
+    assert.equal(local.tombstones.coalesceMinChunks, 8);
+    assert.equal(local.restore.diskCache.enabled, true);
 
     const cloud = mergeConfig({ profile: "cloud-1m" });
     assert.equal(cloud.autoPrune.modelProfile, "cloud-1m");
@@ -408,6 +411,36 @@ describe("registry and tombstones", () => {
     assert.ok(compact.includes("restore_chunks"));
     assert.equal(compact.includes("summary="), false);
     assert.ok(compact.length < normal.length / 2);
+  });
+
+  test("coalesces many tombstones before extreme pressure", () => {
+    const config = testConfig({ tombstones: { coalesceMinChunks: 3 } });
+    const registry = new ChunkRegistry();
+    const messages: Array<{ role: string; toolCallId: string; content: ContentBlock[] }> = [];
+    for (let index = 0; index < 3; index++) {
+      const toolCallId = `tool_${index}`;
+      const chunk = addChunk(
+        registry,
+        config,
+        toolCallId,
+        "code_search",
+        `src/file-${index}.ts:1: result\n`.repeat(120),
+      );
+      registry.prune([chunk.id], "done");
+      messages.push({ role: "toolResult", toolCallId, content: textBlock("original") });
+    }
+
+    const applied = applyPrunedTombstones(
+      messages,
+      (toolCallId) => registry.prunedForToolCall(toolCallId),
+      config,
+    );
+
+    assert.equal(applied.coalesced, true);
+    assert.equal(applied.coalescedCount, 2);
+    assert.equal(applied.messages.length, 2);
+    assert.match(applied.messages[0].content[0].text ?? "", /^\[pruned-manifest:/);
+    assert.match(applied.messages[1].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
   });
 
   test("supports partial pruning and selective child restore", async () => {
@@ -1281,6 +1314,8 @@ describe("pruner and restorer", () => {
 
     const report = renderTelemetryReport(telemetry.snapshot(registry.summary(), config, null));
     assert.ok(report.includes("# Prune Chunks Telemetry Report"));
+    assert.ok(report.includes("## Restore availability"));
+    assert.ok(report.includes("## Pruned tokens by kind"));
     assert.ok(report.includes("Raw tool output is not included"));
   });
 
@@ -1728,6 +1763,7 @@ describe("extension integration", () => {
           maxSummaryChars: 80,
           compactAtPercent: 90,
           coalesceAtPercent: 110,
+          coalesceMinChunks: 16,
           maxCoalescedEntries: 120,
         },
       }),
