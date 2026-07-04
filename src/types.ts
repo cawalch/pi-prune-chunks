@@ -212,6 +212,7 @@ export type PruneChunksConfig = {
     maxSummaryChars: number;
     compactAtPercent: number;
     coalesceAtPercent: number;
+    coalesceMinChunks: number;
     maxCoalescedEntries: number;
   };
   contextGuards: {

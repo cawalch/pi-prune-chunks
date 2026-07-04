@@ -31,7 +31,8 @@ number of provider messages. A session can look healthy by chunk accounting, for
 example `97 tracked, 95 pruned, ~759t active`, and still fail before the
 provider call with a request such as `71834 tokens exceeds the available context
 size 65536`. In that shape, many old pruned tool-result messages plus system
-prompt and conversation history dominate the request. The coalesce threshold
+prompt and conversation history dominate the request. The coalesce threshold, or
+the `coalesceMinChunks` count trigger when many pruned tombstones accumulate,
 collapses older pruned tombstones into one manifest that preserves chunk IDs and
 the `restore_chunks` hint while reducing provider-message overhead.
 
@@ -42,11 +43,11 @@ context guard compacts oversized validation errors in the provider copy,
 preserving the tool name, schema error, request-overflow line, and content hash
 while omitting the raw echoed arguments. The saved transcript remains unchanged.
 
-Raw tool output is not persisted by default. This protects privacy but means
-same-session memory restore is the only exact restore path unless source
-rehydration metadata is available. Chunks without source path and line-range
-metadata, such as repo maps or directory overviews, are intentionally
-unavailable after memory is gone. Enabling `restore.diskCache` stores compressed,
-content-addressed blobs so these non-file chunks can be restored after restart;
-if the cache is later removed or trimmed, restore falls back to source rehydrate
+Raw tool output is persisted to a local compressed disk cache by default for
+non-privacy profiles. This improves exact restore for chunks without source path
+and line-range metadata, such as repo maps or directory overviews, after Pi
+restart. Use `profile: "privacy-max"` or disable `restore.diskCache` when raw
+tool output must stay memory-only; in that mode same-session memory restore is
+the only exact restore path unless source rehydration metadata is available. If
+the cache is later removed or trimmed, restore falls back to source rehydrate
 when possible and otherwise reports the unavailable reason.

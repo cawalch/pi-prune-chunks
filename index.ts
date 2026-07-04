@@ -533,7 +533,7 @@ function renderProfileStatus(config: PruneChunksConfig): string {
     `Active prune profile: ${config.profile}`,
     `Policy: ${config.autoPrune.policy}; model profile: ${config.autoPrune.modelProfile}`,
     `Auto-prune: start=${config.autoPrune.startAtPercent}% target=${config.autoPrune.targetPercent}% maxChunks=${config.autoPrune.maxChunksPerPass}`,
-    `Tombstones: summary=${config.tombstones.includeSummary ? "on" : "off"} maxSummary=${config.tombstones.maxSummaryChars} compact=${config.tombstones.compactAtPercent}% coalesce=${config.tombstones.coalesceAtPercent}%`,
+    `Tombstones: summary=${config.tombstones.includeSummary ? "on" : "off"} maxSummary=${config.tombstones.maxSummaryChars} compact=${config.tombstones.compactAtPercent}% coalesce=${config.tombstones.coalesceAtPercent}%/${config.tombstones.coalesceMinChunks} chunks`,
     `Available profiles: ${POLICY_PROFILE_NAMES.join(", ")}`,
     `Switch with: /prune-profile <profile>; reset with: /prune-profile reset`,
   ].join("\n");

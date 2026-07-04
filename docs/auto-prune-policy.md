@@ -45,11 +45,12 @@ requests.
 
 When pressure is extreme, compact tombstones can still be too expensive because
 each old pruned tool result remains a provider message. The coalescing policy
-uses `tombstones.coalesceAtPercent` to replace many old pruned tool-result
-messages with a single manifest containing chunk IDs and a `restore_chunks`
-hint. `tombstones.maxCoalescedEntries` bounds the number of IDs listed in one
-manifest. Coalescing is a provider-context rewrite only; it does not delete or
-rewrite saved transcript messages.
+uses `tombstones.coalesceAtPercent`, and also `tombstones.coalesceMinChunks` for
+sessions that accumulate many pruned tombstones before extreme pressure, to
+replace many old pruned tool-result messages with a single manifest containing
+chunk IDs and a `restore_chunks` hint. `tombstones.maxCoalescedEntries` bounds
+the number of IDs listed in one manifest. Coalescing is a provider-context
+rewrite only; it does not delete or rewrite saved transcript messages.
 
 File reads are treated more carefully than search and context-pack output:
 instruction files, manifests, and common entrypoints are high risk and are not
