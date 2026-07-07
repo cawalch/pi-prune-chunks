@@ -60,8 +60,9 @@ This extension currently:
   or source-file rehydration when path/range metadata is available;
 - splits very large results into child parts such as `#bulk` so the bulky tail can
   be pruned while the high-signal prefix stays visible;
-- protects high-risk chunks, pins, recent restores, active modified paths, and
-  chunks referenced by the latest working context;
+- protects high-risk chunks, pins, recent restores, active modified paths,
+  chunks referenced by the latest working context, and active reasoning anchors
+  such as issue IDs, test names, commands, and error signatures;
 - has named profiles for `local-32k`, `local-64k`, `cloud-200k`, `cloud-1m`,
   `privacy-max`, `research-heavy`, `coding-heavy`, and `debug-failures`;
 - compacts tombstones at high pressure and coalesces many old tombstones into a

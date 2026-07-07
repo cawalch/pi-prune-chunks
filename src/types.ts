@@ -110,6 +110,7 @@ export interface ContextChunk {
 export type PreserveContext = {
   ids?: Set<string>;
   paths?: Set<string>;
+  anchors?: Set<string>;
 };
 
 export type TelemetryEventType =
@@ -139,6 +140,7 @@ export interface TaskStateSummary {
   activePaths: string[];
   openFailures: string[];
   changedFiles: string[];
+  reasoningAnchors: string[];
   protectedChunks: string[];
   restoreHints: string[];
 }

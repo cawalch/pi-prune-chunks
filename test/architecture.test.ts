@@ -1001,6 +1001,13 @@ describe("pruner and restorer", () => {
       "src/focus.ts:1-40\n".repeat(200),
       { path: "src/focus.ts", startLine: 1, endLine: 40 },
     );
+    const anchored = addChunk(
+      registry,
+      config,
+      "anchored",
+      "code_search",
+      "Tracking issue #123\nAssertionError: keep this diagnostic\n".repeat(80),
+    );
     const disposable = addChunk(
       registry,
       config,
@@ -1011,7 +1018,7 @@ describe("pruner and restorer", () => {
 
     const preserve = preserveContext(
       [
-        { role: "user", content: textBlock("Please keep src/focus.ts in view") },
+        { role: "user", content: textBlock("Please keep src/focus.ts and issue #123 in view") },
         { role: "assistant", content: textBlock("I am editing src/other.ts") },
       ],
       { modifiedFiles: ["src/work.ts"] },
@@ -1026,7 +1033,20 @@ describe("pruner and restorer", () => {
     assert.equal(result.triggered, true);
     assert.equal(registry.get(modified.id)?.pruned, false);
     assert.equal(registry.get(mentioned.id)?.pruned, false);
+    assert.equal(registry.get(anchored.id)?.pruned, false);
     assert.equal(registry.get(disposable.id)?.pruned, true);
+
+    const pressure = pressureSummary(
+      registry,
+      { tokens: 9_000, contextWindow: 10_000, percent: 90 },
+      config,
+      preserve,
+    );
+    assert.ok(
+      pressure.blockedCandidates.some((candidate) =>
+        candidate.reason.includes("contains active reasoning anchor: #123"),
+      ),
+    );
   });
 
   test("suggestions and pressure report include candidate metadata", () => {

@@ -1,3 +1,4 @@
+import { matchingReasoningAnchor } from "./anchors";
 import { isReamerxExploratoryTool, isReamerxTerminalTool } from "./collector";
 import type { ChunkRegistry } from "./registry";
 import type {
@@ -381,6 +382,8 @@ function heuristicBlockedReason(
   if (chunk.risk === "high") return "high risk";
   if (chunk.lastSeenAt == null) return "not yet seen in model context";
   if (isPathPreserved(chunk, preserve?.paths)) return "referenced by active working context";
+  const anchor = matchingReasoningAnchor(chunk, preserve?.anchors);
+  if (anchor) return `contains active reasoning anchor: ${anchor}`;
   if (
     chunk.kind === "file_read" &&
     chunk.risk === "medium" &&
@@ -423,6 +426,8 @@ function adaptiveBlockedReason(
   if (chunk.risk === "high") return "high risk";
   if (chunk.lastSeenAt == null) return "not yet seen in model context";
   if (isPathPreserved(chunk, preserve?.paths)) return "referenced by active working context";
+  const anchor = matchingReasoningAnchor(chunk, preserve?.anchors);
+  if (anchor) return `contains active reasoning anchor: ${anchor}`;
   if (preserve?.ids?.has(chunk.id)) return "referenced by latest assistant message";
   if (chunk.tokenEstimate < minChunkTokens) return "below adaptive token floor";
   if (recentProtected.has(chunk.id)) return "recent protected chunk";
