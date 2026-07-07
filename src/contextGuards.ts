@@ -11,24 +11,35 @@ export function compactFailedToolValidationMessages<
   let modified = false;
   const mapped = messages.map((message) => {
     const text = contentText(message.content ?? []);
-    if (!shouldCompactFailedToolValidation(text, config)) return message;
+    const summary = contextGuardSummary(text, config);
+    if (!summary) return message;
 
     modified = true;
     return {
       ...message,
-      content: [failedToolValidationSummary(text)],
+      content: [summary],
     };
   });
 
   return { messages: mapped, modified };
 }
 
-function shouldCompactFailedToolValidation(text: string, config: PruneChunksConfig): boolean {
+function contextGuardSummary(text: string, config: PruneChunksConfig): ContentBlock | null {
+  if (text.length <= config.contextGuards.maxFailedToolValidationChars) return null;
+  if (shouldCompactFailedToolValidation(text)) return failedToolValidationSummary(text);
+  if (shouldCompactToolInput(text)) return toolInputSummary(text);
+  return null;
+}
+
+function shouldCompactFailedToolValidation(text: string): boolean {
+  const trimmed = text.trimStart();
   return (
-    text.length > config.contextGuards.maxFailedToolValidationChars &&
-    /Validation failed for tool "[^"]+"/.test(text) &&
-    /Received arguments:/i.test(text)
+    /^Validation failed for tool "[^"]+"/.test(trimmed) && /Received arguments:/i.test(trimmed)
   );
+}
+
+function shouldCompactToolInput(text: string): boolean {
+  return /^Tool call arguments for "[^"]+":/i.test(text.trimStart());
 }
 
 function failedToolValidationSummary(text: string): ContentBlock {
@@ -52,6 +63,31 @@ function failedToolValidationSummary(text: string): ContentBlock {
       `original~${estimateTokens(text)}t sha1=${hashText(text).slice(0, 10)};` +
       `${detail}${error} Received arguments omitted; retry with schema-valid minimal arguments]`,
   };
+}
+
+function toolInputSummary(text: string): ContentBlock {
+  const toolName = /^Tool call arguments for "([^"]+)":/i.exec(text.trimStart())?.[1] ?? "unknown";
+  const paths = sourcePaths(text).slice(0, 4);
+  const pathDetail = paths.length > 0 ? ` paths=${paths.map(escapeField).join(",")};` : "";
+  return {
+    type: "text",
+    text:
+      `[compacted-tool-input: tool="${escapeField(toolName)}" ` +
+      `original~${estimateTokens(text)}t sha1=${hashText(text).slice(0, 10)};` +
+      `${pathDetail} arguments omitted; restore from saved transcript]`,
+  };
+}
+
+function sourcePaths(text: string): string[] {
+  const matches = text.match(
+    /(?:^|[\s"'`])((?:\.\/|\.\.\/|\/)?(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)/gm,
+  );
+  if (!matches) return [];
+  return [
+    ...new Set(
+      matches.map((match) => match.trim().replace(/^["'`]+|[),.;:"'`]+$/g, "")).filter(Boolean),
+    ),
+  ];
 }
 
 function escapeField(text: string): string {
