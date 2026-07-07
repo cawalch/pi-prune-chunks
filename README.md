@@ -183,6 +183,7 @@ Run the fixtures locally:
 PATH=/opt/homebrew/bin:$PATH npm run bench:policy-compare
 PATH=/opt/homebrew/bin:$PATH npm run bench:durable-store
 PATH=/opt/homebrew/bin:$PATH npm run bench:context-savings
+PATH=/opt/homebrew/bin:$PATH npm run bench:e2e-pruning
 ```
 
 ## Configuration

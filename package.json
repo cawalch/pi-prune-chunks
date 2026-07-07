@@ -23,6 +23,7 @@
     "bench:context-savings": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/context-savings.js",
     "bench:durable-store": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/durable-store-value.js",
     "bench:policy-compare": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/policy-compare.js",
+    "bench:e2e-pruning": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/e2e-pruning-impact.js",
     "pack:dry": "npm pack --dry-run"
   },
   "keywords": [
