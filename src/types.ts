@@ -134,6 +134,15 @@ export interface ContinuationManifestEntry {
   sourceAnchors?: string[];
 }
 
+export interface TaskStateSummary {
+  headline: string;
+  activePaths: string[];
+  openFailures: string[];
+  changedFiles: string[];
+  protectedChunks: string[];
+  restoreHints: string[];
+}
+
 export interface ContinuationManifest {
   id: string;
   generatedAt: number;
@@ -143,6 +152,7 @@ export interface ContinuationManifest {
   modelProfile: ModelProfile;
   modifiedPaths: string[];
   pinnedChunkIds: string[];
+  taskState?: TaskStateSummary;
   active: ContinuationManifestEntry[];
   prunedHighValue: ContinuationManifestEntry[];
   unresolvedFailures: ContinuationManifestEntry[];

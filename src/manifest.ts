@@ -8,6 +8,7 @@ import type {
   ContinuationManifestEntry,
   PreserveContext,
   PruneChunksConfig,
+  TaskStateSummary,
 } from "./types";
 
 export type ContinuationPrepResult = {
@@ -57,6 +58,27 @@ export function buildContinuationManifest(
     .sort((a, b) => highValueScore(b, preserve) - highValueScore(a, preserve))
     .slice(0, 12)
     .map((chunk) => chunk.id);
+  const activeEntries = active
+    .filter((chunk) => isManifestWorthy(chunk, preserve))
+    .sort((a, b) => highValueScore(b, preserve) - highValueScore(a, preserve))
+    .slice(0, 8)
+    .map((chunk) => manifestEntry(chunk, "active"));
+  const prunedHighValue = pruned
+    .filter((chunk) => isManifestWorthy(chunk, preserve) || chunk.risk !== "low")
+    .sort((a, b) => highValueScore(b, preserve) - highValueScore(a, preserve))
+    .slice(0, 8)
+    .map((chunk) => manifestEntry(chunk, "pruned"));
+  const unresolvedFailures = active
+    .filter(isFailureLike)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 5)
+    .map((chunk) => manifestEntry(chunk, "active"));
+  const recentRestores = registry
+    .all()
+    .filter((chunk) => chunk.lastRestoredAt != null)
+    .sort((a, b) => (b.lastRestoredAt ?? 0) - (a.lastRestoredAt ?? 0))
+    .slice(0, 5)
+    .map((chunk) => manifestEntry(chunk, chunk.pruned ? "pruned" : "active"));
 
   return {
     id: `cm_${now.toString(36)}`,
@@ -67,27 +89,17 @@ export function buildContinuationManifest(
     modelProfile: config.autoPrune.modelProfile,
     modifiedPaths,
     pinnedChunkIds,
-    active: active
-      .filter((chunk) => isManifestWorthy(chunk, preserve))
-      .sort((a, b) => highValueScore(b, preserve) - highValueScore(a, preserve))
-      .slice(0, 8)
-      .map((chunk) => manifestEntry(chunk, "active")),
-    prunedHighValue: pruned
-      .filter((chunk) => isManifestWorthy(chunk, preserve) || chunk.risk !== "low")
-      .sort((a, b) => highValueScore(b, preserve) - highValueScore(a, preserve))
-      .slice(0, 8)
-      .map((chunk) => manifestEntry(chunk, "pruned")),
-    unresolvedFailures: active
-      .filter(isFailureLike)
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .slice(0, 5)
-      .map((chunk) => manifestEntry(chunk, "active")),
-    recentRestores: registry
-      .all()
-      .filter((chunk) => chunk.lastRestoredAt != null)
-      .sort((a, b) => (b.lastRestoredAt ?? 0) - (a.lastRestoredAt ?? 0))
-      .slice(0, 5)
-      .map((chunk) => manifestEntry(chunk, chunk.pruned ? "pruned" : "active")),
+    taskState: buildTaskStateSummary({
+      active,
+      prunedHighValue,
+      unresolvedFailures,
+      modifiedPaths,
+      pinnedChunkIds,
+    }),
+    active: activeEntries,
+    prunedHighValue,
+    unresolvedFailures,
+    recentRestores,
   };
 }
 
@@ -105,6 +117,10 @@ export function renderContinuationManifestPreview(
   if (manifest.modifiedPaths.length > 0) {
     lines.push(`  modified/mentioned paths: ${manifest.modifiedPaths.slice(0, 6).join(", ")}`);
   }
+  const taskState = manifest.taskState ?? legacyTaskStateSummary(manifest);
+  lines.push("  task state:");
+  lines.push(`    - ${taskState.headline}`);
+  for (const line of compactTaskStateLines(taskState)) lines.push(`    - ${line}`);
   if (manifest.active.length > 0) {
     lines.push("  active working set:");
     for (const entry of manifest.active.slice(0, 5)) lines.push(`    - ${entryLine(entry)}`);
@@ -125,6 +141,80 @@ export function renderContinuationManifestPreview(
       lines.push(`    - ${entryLine(entry)}`);
   }
   return lines.join("\n");
+}
+
+function buildTaskStateSummary(input: {
+  active: ContextChunk[];
+  prunedHighValue: ContinuationManifestEntry[];
+  unresolvedFailures: ContinuationManifestEntry[];
+  modifiedPaths: string[];
+  pinnedChunkIds: string[];
+}): TaskStateSummary {
+  const changedFiles = uniqueStrings(
+    input.active
+      .filter((chunk) => chunk.kind === "diff")
+      .flatMap(
+        (chunk) =>
+          chunk.decisionCard?.sourceAnchors ?? (chunk.source?.path ? [chunk.source.path] : []),
+      ),
+  ).slice(0, 6);
+  const activePaths = uniqueStrings([...input.modifiedPaths, ...changedFiles]).slice(0, 8);
+  const protectedChunks = input.pinnedChunkIds.slice(0, 6);
+  const openFailures = input.unresolvedFailures
+    .map((entry) => entrySummary(entry))
+    .filter(Boolean)
+    .slice(0, 5);
+  const restoreHints = input.prunedHighValue
+    .filter((entry) => entry.restoreHint)
+    .map((entry) => entrySummary(entry))
+    .slice(0, 5);
+
+  return {
+    headline:
+      `${activePaths.length} active path${activePaths.length === 1 ? "" : "s"}, ` +
+      `${openFailures.length} open failure${openFailures.length === 1 ? "" : "s"}, ` +
+      `${changedFiles.length} changed-file hint${changedFiles.length === 1 ? "" : "s"}, ` +
+      `${restoreHints.length} restore hint${restoreHints.length === 1 ? "" : "s"}`,
+    activePaths,
+    openFailures,
+    changedFiles,
+    protectedChunks,
+    restoreHints,
+  };
+}
+
+function legacyTaskStateSummary(manifest: ContinuationManifest): TaskStateSummary {
+  return {
+    headline:
+      `${manifest.modifiedPaths.length} active path${manifest.modifiedPaths.length === 1 ? "" : "s"}, ` +
+      `${manifest.unresolvedFailures.length} open failure${manifest.unresolvedFailures.length === 1 ? "" : "s"}, ` +
+      "legacy manifest without task-state details",
+    activePaths: manifest.modifiedPaths.slice(0, 8),
+    openFailures: manifest.unresolvedFailures.map((entry) => entrySummary(entry)).slice(0, 5),
+    changedFiles: [],
+    protectedChunks: manifest.pinnedChunkIds.slice(0, 6),
+    restoreHints: manifest.prunedHighValue
+      .filter((entry) => entry.restoreHint)
+      .map((entry) => entrySummary(entry))
+      .slice(0, 5),
+  };
+}
+
+function compactTaskStateLines(taskState: TaskStateSummary): string[] {
+  const lines: string[] = [];
+  if (taskState.activePaths.length > 0) {
+    lines.push(`active paths: ${taskState.activePaths.slice(0, 5).join(", ")}`);
+  }
+  if (taskState.openFailures.length > 0) {
+    lines.push(`open failures: ${taskState.openFailures.slice(0, 3).join("; ")}`);
+  }
+  if (taskState.protectedChunks.length > 0) {
+    lines.push(`protected chunks: ${taskState.protectedChunks.slice(0, 6).join(", ")}`);
+  }
+  if (taskState.restoreHints.length > 0) {
+    lines.push(`restore hints: ${taskState.restoreHints.slice(0, 3).join("; ")}`);
+  }
+  return lines;
 }
 
 function manifestEntry(
@@ -185,6 +275,16 @@ function entryLine(entry: ContinuationManifestEntry): string {
   const restore = entry.restoreHint ? `; ${entry.restoreHint}` : "";
   const card = entry.card ? `; ${entry.card}` : "";
   return `${entry.id} ${entry.kind}/${entry.risk} ${entry.status} ~${entry.tokenEstimate}t ${entry.label}${restore}${card}`;
+}
+
+function entrySummary(entry: ContinuationManifestEntry): string {
+  const restore = entry.restoreHint ? `; ${entry.restoreHint}` : "";
+  const card = entry.card ? `; ${entry.card}` : "";
+  return `${entry.id} ${entry.kind}/${entry.risk} ${entry.label}${restore}${card}`;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function normalizePath(path: string): string {
