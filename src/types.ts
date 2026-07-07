@@ -16,6 +16,8 @@ export type RestoreMode = "memory" | "disk_cache" | "source_rehydrate" | "unavai
 
 export type AutoPrunePolicyMode = "heuristic-v1" | "adaptive-v1";
 
+export type DecisionCardMode = "heuristic" | "model-assisted";
+
 export type ModelProfile = "auto" | "local-32k" | "local-64k" | "cloud-200k" | "cloud-1m";
 
 export type PolicyProfileName =
@@ -217,6 +219,11 @@ export type PruneChunksConfig = {
   };
   reamerx: {
     pruneExploratoryAfterTerminal: boolean;
+  };
+  decisionCards: {
+    mode: DecisionCardMode;
+    maxModelInputTokens: number;
+    maxModelOutputChars: number;
   };
   tombstones: {
     includeSummary: boolean;

@@ -3,7 +3,9 @@
 `pi-prune-chunks` is split into five layers:
 
 1. Collector: turns large text tool results into typed chunk candidates and
-   deterministic decision cards.
+   deterministic decision cards. When explicitly configured, it can accept a
+   bounded externally supplied model decision-card response and falls back to the
+   heuristic card if the response is missing or invalid.
 2. Registry: owns `ContextChunk` metadata, stable IDs, pin/prune state, audit
    events, and configured content caches.
 3. Pruner: scores safe candidates and applies manual or automatic pruning.

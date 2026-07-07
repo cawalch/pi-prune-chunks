@@ -90,6 +90,7 @@ export default function (pi: ExtensionAPI) {
       content: normalizeContent(event.content),
       params: extractParams(event),
       scope: extractScope(event),
+      modelCardResponse: extractModelCardResponse(event),
       config,
     });
     if (collected) {
@@ -580,6 +581,17 @@ function extractParams(event: Record<string, unknown>): Record<string, unknown> 
   return possible && typeof possible === "object" && !Array.isArray(possible)
     ? (possible as Record<string, unknown>)
     : undefined;
+}
+
+function extractModelCardResponse(event: Record<string, unknown>): unknown {
+  const metadata = objectValue(event.metadata) ?? objectValue(event.context) ?? {};
+  const params = extractParams(event) ?? {};
+  return (
+    metadata.modelDecisionCard ??
+    metadata.decisionCard ??
+    params.modelDecisionCard ??
+    params.decisionCard
+  );
 }
 
 function extractScope(event: Record<string, unknown>): ChunkScope | undefined {

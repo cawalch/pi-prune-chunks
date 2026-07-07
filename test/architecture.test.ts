@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { describe } from "node:test";
 import extension, { preserveContext } from "../index";
+import { buildModelDecisionCardPrompt, modelDecisionCardFromResponse } from "../src/cards";
 import {
   classifyKind,
   classifyRisk,
@@ -207,6 +208,75 @@ describe("collector", () => {
     assert.ok(pack);
     assert.equal(pack.kind, "context_pack");
     assert.ok(pack.decisionCard?.evidence.some((line) => /readiness/.test(line)));
+  });
+
+  test("model-assisted decision cards are config-gated and bounded", () => {
+    const heuristicConfig = testConfig();
+    const modelConfig = testConfig({
+      decisionCards: { mode: "model-assisted", maxModelInputTokens: 12, maxModelOutputChars: 32 },
+    });
+    const response = {
+      gist: "model gist that is intentionally longer than the configured output budget",
+      evidence: ["model evidence that is also too long for the output budget"],
+      restoreWhen: ["need semantic model card"],
+      sourceAnchors: ["src/cards.ts"],
+    };
+
+    const fallback = collectToolResult({
+      toolCallId: "model_fallback",
+      toolName: "read",
+      content: textBlock("src/cards.ts:1 model ignored\n".repeat(80)),
+      params: { path: "src/cards.ts", startLine: 1, endLine: 40 },
+      modelCardResponse: response,
+      config: heuristicConfig,
+    });
+    assert.ok(fallback);
+    assert.equal(fallback.decisionCard?.generatedBy, "heuristic");
+
+    const modeled = collectToolResult({
+      toolCallId: "model_enabled",
+      toolName: "read",
+      content: textBlock("src/cards.ts:1 model used\n".repeat(80)),
+      params: { path: "src/cards.ts", startLine: 1, endLine: 40 },
+      modelCardResponse: JSON.stringify(response),
+      config: modelConfig,
+    });
+    assert.ok(modeled);
+    assert.equal(modeled.decisionCard?.generatedBy, "model");
+    assert.ok((modeled.decisionCard?.gist.length ?? 0) <= 34);
+    assert.ok(modeled.decisionCard?.sourceAnchors?.includes("src/cards.ts"));
+
+    const invalid = modelDecisionCardFromResponse(
+      "not json",
+      fallback.decisionCard,
+      modelConfig.decisionCards,
+    );
+    assert.equal(invalid.generatedBy, "heuristic");
+
+    const prompt = buildModelDecisionCardPrompt({
+      kind: "file_read",
+      toolName: "read",
+      text: "important line\n".repeat(100),
+      source: { path: "src/cards.ts", startLine: 1, endLine: 20 },
+      decisionCards: modelConfig.decisionCards,
+    });
+    assert.ok(prompt);
+    assert.ok(prompt.includes("Input truncated to model-card budget"));
+    assert.ok(prompt.length < 900);
+  });
+
+  test("research-heavy enables model-assisted card mode with heuristic fallback", () => {
+    const config = testConfig({ profile: "research-heavy" });
+    assert.equal(config.decisionCards.mode, "model-assisted");
+    const chunk = collectToolResult({
+      toolCallId: "research_card",
+      toolName: "read",
+      content: textBlock("src/research.ts:1 fallback card\n".repeat(80)),
+      params: { path: "src/research.ts", startLine: 1, endLine: 20 },
+      config,
+    });
+    assert.ok(chunk);
+    assert.equal(chunk.decisionCard?.generatedBy, "heuristic");
   });
 
   test("infers source and low risk from read-only shell commands", () => {
