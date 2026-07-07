@@ -36,6 +36,11 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
   reamerx: {
     pruneExploratoryAfterTerminal: true,
   },
+  decisionCards: {
+    mode: "heuristic",
+    maxModelInputTokens: 1200,
+    maxModelOutputChars: 800,
+  },
   tombstones: {
     includeSummary: true,
     includeRestoreHint: true,
@@ -61,13 +66,21 @@ type RawDiskCacheConfig = boolean | Partial<DiskCacheConfig> | undefined;
 type RawPruneChunksConfig = Partial<
   Omit<
     PruneChunksConfig,
-    "autoPrune" | "contextGuards" | "profile" | "reamerx" | "restore" | "tombstones" | "track"
+    | "autoPrune"
+    | "contextGuards"
+    | "decisionCards"
+    | "profile"
+    | "reamerx"
+    | "restore"
+    | "tombstones"
+    | "track"
   >
 > & {
   profile?: PolicyProfileName;
   track?: Partial<PruneChunksConfig["track"]>;
   autoPrune?: Partial<PruneChunksConfig["autoPrune"]>;
   reamerx?: Partial<PruneChunksConfig["reamerx"]>;
+  decisionCards?: Partial<PruneChunksConfig["decisionCards"]>;
   tombstones?: Partial<PruneChunksConfig["tombstones"]>;
   contextGuards?: Partial<PruneChunksConfig["contextGuards"]>;
   restore?: Partial<Omit<PruneChunksConfig["restore"], "diskCache">> & {
@@ -189,6 +202,11 @@ export const POLICY_PROFILES: Record<
     },
   },
   "research-heavy": {
+    decisionCards: {
+      mode: "model-assisted",
+      maxModelInputTokens: 1800,
+      maxModelOutputChars: 1200,
+    },
     autoPrune: {
       ...DEFAULT_CONFIG.autoPrune,
       startAtPercent: 78,
@@ -264,6 +282,14 @@ function mergeWithBase(
       pruneExploratoryAfterTerminal:
         input.reamerx?.pruneExploratoryAfterTerminal ?? base.reamerx.pruneExploratoryAfterTerminal,
     },
+    decisionCards: {
+      mode:
+        input.decisionCards?.mode === "model-assisted" ? "model-assisted" : base.decisionCards.mode,
+      maxModelInputTokens:
+        input.decisionCards?.maxModelInputTokens ?? base.decisionCards.maxModelInputTokens,
+      maxModelOutputChars:
+        input.decisionCards?.maxModelOutputChars ?? base.decisionCards.maxModelOutputChars,
+    },
     tombstones: {
       includeSummary: input.tombstones?.includeSummary ?? base.tombstones.includeSummary,
       includeRestoreHint:
@@ -302,6 +328,7 @@ function applyProfile(config: PruneChunksConfig, profile: PolicyProfileName): Pr
     track: { ...base.track, ...profileConfig.track },
     autoPrune: { ...base.autoPrune, ...profileConfig.autoPrune },
     reamerx: { ...base.reamerx, ...profileConfig.reamerx },
+    decisionCards: { ...base.decisionCards, ...profileConfig.decisionCards },
     tombstones: { ...base.tombstones, ...profileConfig.tombstones },
     contextGuards: { ...base.contextGuards, ...profileConfig.contextGuards },
     restore: {

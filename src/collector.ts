@@ -24,6 +24,7 @@ type ToolResultInput = {
   content: ContentBlock[];
   params?: Record<string, unknown>;
   scope?: ChunkScope;
+  modelCardResponse?: unknown;
   config: PruneChunksConfig;
 };
 
@@ -181,6 +182,8 @@ export function collectToolResult(input: ToolResultInput): CollectedChunk | null
     text,
     source,
     maxChars: input.config.tombstones.maxSummaryChars,
+    modelCardResponse: input.modelCardResponse,
+    decisionCards: input.config.decisionCards,
   });
   const label = makeLabel(input.toolName, kind, text, source);
 

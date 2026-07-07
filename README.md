@@ -51,7 +51,7 @@ This extension currently:
   diffs, ReamerX/FlowTrace-style context packs, outlines, symbols, and generic
   tools;
 - assigns stable IDs, source anchors, risk labels, token estimates, and compact
-  decision cards;
+  decision cards, with optional config-gated model-assisted card responses;
 - manually prunes, restores, pins, and unpins chunks by ID;
 - auto-prunes safe old chunks when context pressure crosses a configured band;
 - prunes superseded or duplicate results as new evidence arrives;
@@ -204,6 +204,23 @@ Tighter local model window:
 {
   "pruneChunks": {
     "profile": "local-32k"
+  }
+}
+```
+
+Research-heavy sessions can accept bounded, externally supplied model-assisted
+card responses while still falling back to deterministic heuristic cards when no
+valid response is provided:
+
+```json
+{
+  "pruneChunks": {
+    "profile": "research-heavy",
+    "decisionCards": {
+      "mode": "model-assisted",
+      "maxModelInputTokens": 1800,
+      "maxModelOutputChars": 1200
+    }
   }
 }
 ```
