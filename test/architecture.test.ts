@@ -1611,9 +1611,18 @@ describe("extension integration", () => {
 
     assert.ok(pressure.content[0].text.includes("Continuation manifest:"));
     assert.ok(pressure.content[0].text.includes("pinned for carry-forward:"));
+    assert.ok(pressure.content[0].text.includes("task state:"));
+    assert.ok(pressure.content[0].text.includes("active paths: src/work.ts"));
+    assert.ok(pressure.content[0].text.includes("open failures:"));
+    assert.ok(pressure.content[0].text.includes("restore hints:"));
     assert.ok(pressure.content[0].text.includes("unresolved failures/tests:"));
     assert.ok(pressure.content[0].text.includes("restorable pruned evidence:"));
-    assert.ok(pi.entries.at(-1)?.data.state.continuationManifest);
+    const manifest = pi.entries.at(-1)?.data.state.continuationManifest;
+    assert.ok(manifest);
+    assert.ok(manifest.taskState.openFailures.some((line: string) => line.includes("npm test")));
+    assert.ok(
+      manifest.taskState.restoreHints.some((line: string) => line.includes("restore_chunks")),
+    );
 
     const pinned = await pi.tools.list_context_chunks.execute("list", { pinned: true, limit: 10 });
     assert.ok(

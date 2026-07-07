@@ -70,8 +70,9 @@ This extension currently:
 - cleans up exploratory ReamerX output after terminal evidence such as an
   edit-pack, slice, or change report is collected;
 - emits pressure and telemetry reports without storing raw output in telemetry;
-- prepares a continuation manifest near compaction pressure so failures, diffs,
-  modified paths, and restore hints survive a resume;
+- prepares a continuation manifest near compaction pressure with a compact task
+  state summary so failures, diffs, modified paths, protected chunks, and restore
+  hints survive a resume;
 - compacts oversized failed-tool validation payloads in provider context so a bad
   tool call does not poison the next call with a giant echoed argument block.
 

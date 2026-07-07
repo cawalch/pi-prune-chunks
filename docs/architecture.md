@@ -13,7 +13,8 @@
    parent prefix/failure lines visible.
 5. Continuation manifest: when provider pressure reaches the compact tombstone
    band, pins carry-forward failures/diffs/modified-path chunks and persists a
-   compact ID/card/restore-hint manifest to help Pi compaction and resume.
+   compact task-state plus ID/card/restore-hint manifest to help Pi compaction
+   and resume.
 6. Scope isolation: when Pi tool events include run/agent metadata, chunks carry
    `main`, `subagent`, or `chain` scope so child-agent exploration can be listed,
    pruned, and restored independently from parent working context.
