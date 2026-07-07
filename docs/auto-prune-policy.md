@@ -64,7 +64,10 @@ context.
 Working-context protection adds another guard above generic scoring. If the
 latest user or assistant message mentions a tracked source path, or Pi exposes
 that path as modified in the current context, the chunk is blocked from
-auto-prune with the reason `referenced by active working context`. Pressure
+auto-prune with the reason `referenced by active working context`. The same
+working-context pass extracts deterministic reasoning anchors such as issue IDs,
+test file names, commands, and error signatures; chunks containing an active
+anchor are blocked with `contains active reasoning anchor: <anchor>`. Pressure
 reports show the largest protected chunks and their block reasons so the agent
 can decide whether to manually pin, restore, or leave them alone.
 

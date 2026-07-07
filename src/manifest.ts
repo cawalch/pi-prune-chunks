@@ -1,3 +1,4 @@
+import { chunkReasoningAnchors } from "./anchors";
 import { compactDecisionCard } from "./cards";
 import { contextPercent } from "./pruner";
 import type { ChunkRegistry } from "./registry";
@@ -159,6 +160,9 @@ function buildTaskStateSummary(input: {
       ),
   ).slice(0, 6);
   const activePaths = uniqueStrings([...input.modifiedPaths, ...changedFiles]).slice(0, 8);
+  const reasoningAnchors = uniqueStrings(
+    input.active.flatMap((chunk) => chunkReasoningAnchors(chunk)),
+  ).slice(0, 8);
   const protectedChunks = input.pinnedChunkIds.slice(0, 6);
   const openFailures = input.unresolvedFailures
     .map((entry) => entrySummary(entry))
@@ -174,10 +178,12 @@ function buildTaskStateSummary(input: {
       `${activePaths.length} active path${activePaths.length === 1 ? "" : "s"}, ` +
       `${openFailures.length} open failure${openFailures.length === 1 ? "" : "s"}, ` +
       `${changedFiles.length} changed-file hint${changedFiles.length === 1 ? "" : "s"}, ` +
+      `${reasoningAnchors.length} reasoning anchor${reasoningAnchors.length === 1 ? "" : "s"}, ` +
       `${restoreHints.length} restore hint${restoreHints.length === 1 ? "" : "s"}`,
     activePaths,
     openFailures,
     changedFiles,
+    reasoningAnchors,
     protectedChunks,
     restoreHints,
   };
@@ -192,6 +198,7 @@ function legacyTaskStateSummary(manifest: ContinuationManifest): TaskStateSummar
     activePaths: manifest.modifiedPaths.slice(0, 8),
     openFailures: manifest.unresolvedFailures.map((entry) => entrySummary(entry)).slice(0, 5),
     changedFiles: [],
+    reasoningAnchors: [],
     protectedChunks: manifest.pinnedChunkIds.slice(0, 6),
     restoreHints: manifest.prunedHighValue
       .filter((entry) => entry.restoreHint)
@@ -207,6 +214,9 @@ function compactTaskStateLines(taskState: TaskStateSummary): string[] {
   }
   if (taskState.openFailures.length > 0) {
     lines.push(`open failures: ${taskState.openFailures.slice(0, 3).join("; ")}`);
+  }
+  if (taskState.reasoningAnchors.length > 0) {
+    lines.push(`reasoning anchors: ${taskState.reasoningAnchors.slice(0, 6).join(", ")}`);
   }
   if (taskState.protectedChunks.length > 0) {
     lines.push(`protected chunks: ${taskState.protectedChunks.slice(0, 6).join(", ")}`);

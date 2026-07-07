@@ -6,6 +6,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { extractReasoningAnchors } from "./src/anchors";
 import { collectToolResult } from "./src/collector";
 import { isPolicyProfile, mergeConfig, POLICY_PROFILE_NAMES } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
@@ -619,6 +620,7 @@ export function preserveContext(
   return {
     ids: new Set(text.match(/pc_[0-9a-z]+_[0-9a-f]{6}/g) ?? []),
     paths: new Set([...pathsReferencedInText(text), ...modifiedPaths(ctx)].map(normalizePath)),
+    anchors: new Set(extractReasoningAnchors(text)),
   };
 }
 
