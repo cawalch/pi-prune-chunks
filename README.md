@@ -74,8 +74,9 @@ This extension currently:
 - prepares a continuation manifest near compaction pressure with a compact task
   state summary so failures, diffs, modified paths, protected chunks, and restore
   hints survive a resume;
-- compacts oversized failed-tool validation payloads in provider context so a bad
-  tool call does not poison the next call with a giant echoed argument block.
+- compacts oversized failed-tool validation payloads and large tool-input echoes
+  in provider context so a bad or bulky tool call does not poison the next call
+  with a giant argument block.
 
 ## Install
 

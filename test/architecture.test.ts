@@ -1913,6 +1913,41 @@ describe("extension integration", () => {
     assert.equal(providerMessages[1].content[0].text, "continue fixing the edit");
   });
 
+  test("context hook compacts oversized tool input echoes", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+
+    const hugePayload = "const noisy = true;\n".repeat(900);
+    const toolInputText =
+      'Tool call arguments for "write":\n' +
+      JSON.stringify({ path: "src/generated.ts", content: hugePayload });
+    const originalMessages = [
+      {
+        role: "assistant",
+        content: textBlock(toolInputText),
+      },
+    ];
+
+    const contextResult = await pi.handlers.context?.(
+      { messages: originalMessages },
+      {
+        getContextUsage: () => ({ tokens: 66_019, contextWindow: 65_536, percent: 101 }),
+      },
+    );
+    assert.ok(contextResult);
+
+    const providerMessages = contextResult.messages as typeof originalMessages;
+    const compacted = providerMessages[0].content[0].text ?? "";
+    assert.match(compacted, /^\[compacted-tool-input:/);
+    assert.ok(compacted.includes('tool="write"'));
+    assert.ok(compacted.includes("src/generated.ts"));
+    assert.ok(compacted.includes("arguments omitted"));
+    assert.ok(compacted.includes("restore from saved transcript"));
+    assert.ok(!compacted.includes("const noisy"));
+    assert.ok(compacted.length < 300);
+    assert.equal(originalMessages[0].content[0].text, toolInputText);
+  });
+
   test("tool_result hook persists immediate pruning of superseded chunks", async () => {
     const pi = createMockPi(testConfig());
     extension(pi as never);

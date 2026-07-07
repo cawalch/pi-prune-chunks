@@ -38,10 +38,12 @@ the `restore_chunks` hint while reducing provider-message overhead.
 
 Failed tool-call validation can create a separate overflow path. A malformed
 call can fail before execution and echo a large `Received arguments` block, such
-as an `edit` request with a full `oldText` body but no valid `newText`. The
-context guard compacts oversized validation errors in the provider copy,
-preserving the tool name, schema error, request-overflow line, and content hash
-while omitting the raw echoed arguments. The saved transcript remains unchanged.
+as an `edit` request with a full `oldText` body but no valid `newText`. Large
+tool-input echoes can create the same problem before or after execution. The
+context guard compacts oversized validation errors and explicit tool-input echoes
+in the provider copy, preserving the tool name, schema/error or source-path
+hints, request-overflow line when present, and content hash while omitting the
+raw echoed arguments. The saved transcript remains unchanged.
 
 Raw tool output is persisted to a local compressed disk cache by default for
 non-privacy profiles. This improves exact restore for chunks without source path
