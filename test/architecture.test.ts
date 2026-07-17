@@ -552,6 +552,57 @@ describe("registry and tombstones", () => {
     const [parentRestore] = await restoreChunks(registry, [parent.id], config);
     assert.equal(parentRestore.status, "restored");
   });
+
+  test("coalesces full tombstones even when other messages have pruned parts", () => {
+    const config = testConfig({ tombstones: { coalesceMinChunks: 3 } });
+    const registry = new ChunkRegistry();
+    const partialText = [
+      "important header",
+      ...Array.from(
+        { length: 500 },
+        (_, index) =>
+          `bulk line ${index} with enough repeated implementation detail to create a partial chunk`,
+      ),
+    ].join("\n");
+    const partialParent = addChunk(registry, config, "partial_tool", "read", partialText, {
+      path: "src/partial.ts",
+    });
+    const partialBulk = registry.all().find((chunk) => chunk.parentId === partialParent.id);
+    assert.ok(partialBulk);
+    registry.prune([partialBulk.id], "partial prune bulk");
+
+    const messages: Array<{ role: string; toolCallId: string; content: ContentBlock[] }> = [
+      { role: "toolResult", toolCallId: "partial_tool", content: textBlock(partialText) },
+    ];
+    for (let index = 0; index < 3; index++) {
+      const toolCallId = `full_${index}`;
+      const chunk = addChunk(
+        registry,
+        config,
+        toolCallId,
+        "code_search",
+        `src/file-${index}.ts:1: result\n`.repeat(120),
+      );
+      registry.prune([chunk.id], "full prune");
+      messages.push({ role: "toolResult", toolCallId, content: textBlock("full output") });
+    }
+
+    const applied = applyPrunedTombstones(
+      messages,
+      (toolCallId) => registry.prunedForToolCall(toolCallId),
+      config,
+      {},
+      (toolCallId) => registry.prunedPartsForToolCall(toolCallId),
+    );
+
+    assert.equal(applied.coalesced, true);
+    assert.equal(applied.coalescedCount, 2);
+    assert.equal(applied.messages.length, 3);
+    assert.match(applied.messages[0].content[0].text ?? "", /important header/);
+    assert.match(applied.messages[0].content[0].text ?? "", /\[pruned:.*#bulk/);
+    assert.match(applied.messages[1].content[0].text ?? "", /^\[pruned-manifest:/);
+    assert.match(applied.messages[2].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
+  });
 });
 
 describe("pruner and restorer", () => {
@@ -588,6 +639,26 @@ describe("pruner and restorer", () => {
     assert.equal(registry.get(safe.id)?.pruned, true);
     assert.equal(registry.get(pinned.id)?.pruned, false);
     assert.equal(registry.get(failure.id)?.pruned, false);
+  });
+
+  test("auto-prune can fully prune parent chunks with children at compact pressure", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const text = Array.from(
+      { length: 500 },
+      (_, index) =>
+        `export const value${index} = ${index}; // enough repeated implementation detail to create a partial chunk`,
+    ).join("\n");
+    const parent = addChunk(registry, config, "large_read", "read", text, { path: "src/large.ts" });
+    const bulk = registry.all().find((chunk) => chunk.parentId === parent.id);
+    assert.ok(bulk);
+    registry.prune([bulk.id], "partial prune bulk first");
+
+    const usage: ContextUsage = { tokens: 9_200, contextWindow: 10_000, percent: 92 };
+    const result = autoPrune(registry, usage, config);
+
+    assert.equal(result.triggered, true);
+    assert.equal(registry.get(parent.id)?.pruned, true);
   });
 
   test("auto-prune waits until a chunk has been seen in model context", () => {

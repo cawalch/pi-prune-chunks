@@ -89,7 +89,13 @@ export function suggestPruneCandidates(
   const candidates: PruneCandidate[] = [];
 
   for (const chunk of active) {
-    if (!chunk.part && registry.hasChildren(chunk.id)) continue;
+    if (
+      !chunk.part &&
+      registry.hasChildren(chunk.id) &&
+      !canPruneParentWithChildren(chunk, options.pressurePercent, config)
+    ) {
+      continue;
+    }
     const blockedReason = autoPruneBlockedReason(
       chunk,
       config,
@@ -348,6 +354,16 @@ export function blockedPruneCandidates(
 
   blocked.sort((a, b) => b.tokenEstimate - a.tokenEstimate);
   return blocked.slice(0, Math.max(0, options.limit ?? 10));
+}
+
+function canPruneParentWithChildren(
+  chunk: ContextChunk,
+  pressurePercent: number | null | undefined,
+  config: PruneChunksConfig,
+): boolean {
+  return (
+    !chunk.part && pressurePercent != null && pressurePercent >= config.tombstones.compactAtPercent
+  );
 }
 
 function autoPruneBlockedReason(
