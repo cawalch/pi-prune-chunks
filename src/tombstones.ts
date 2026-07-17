@@ -148,7 +148,10 @@ function applyCoalescedPrunedTombstones<
         ...message,
         content:
           index === manifestIndex
-            ? coalescedManifest(coalesced.map((item) => item.chunk), config)
+            ? coalescedManifest(
+                coalesced.map((item) => item.chunk),
+                config,
+              )
             : coalescedMemberTombstone(chunk),
       });
       continue;

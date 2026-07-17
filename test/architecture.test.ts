@@ -32,12 +32,7 @@ import {
   telemetryTombstoneTokens,
 } from "../src/telemetry";
 import { applyPrunedTombstones, tombstoneFor } from "../src/tombstones";
-import type {
-  ContentBlock,
-  ContextChunk,
-  ContextUsage,
-  PruneChunksConfig,
-} from "../src/types";
+import type { ContentBlock, ContextChunk, ContextUsage, PruneChunksConfig } from "../src/types";
 
 function textBlock(text: string): ContentBlock[] {
   return [{ type: "text", text }];
