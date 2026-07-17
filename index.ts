@@ -83,6 +83,18 @@ export default function (pi: ExtensionAPI) {
     continuationManifest = undefined;
   });
 
+  pi.on("session_compact", async () => {
+    // Compaction replaces the transcript with a summary, so the continuation
+    // manifest we prepared against the pre-compaction state no longer
+    // describes the surviving context. Drop it so context_pressure does not
+    // report a stale manifest. Tracked chunks stay restorable from cache.
+    // (Active chunks summarized away are reconciled lazily by later pruning.)
+    if (continuationManifest) {
+      continuationManifest = undefined;
+      persistState();
+    }
+  });
+
   pi.on("tool_result", async (event) => {
     const collected = collectToolResult({
       toolCallId: String(event.toolCallId),

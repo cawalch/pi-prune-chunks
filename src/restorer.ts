@@ -9,8 +9,11 @@ export async function restoreChunks(
   config: PruneChunksConfig,
   options: { cwd?: string } = {},
 ): Promise<ChunkActionResult[]> {
+  // Restore the whole family so a restored parent is coherent with its parts
+  // (mirrors prune's cascade). A lone part id still restores just itself.
+  const familyIds = registry.familyOf(ids);
   const results: ChunkActionResult[] = [];
-  for (const id of ids) {
+  for (const id of familyIds) {
     const chunk = registry.get(id);
     if (!chunk) {
       results.push({ id, status: "not_found", tokens: 0 });
