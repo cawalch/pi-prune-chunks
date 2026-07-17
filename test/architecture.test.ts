@@ -641,6 +641,72 @@ describe("registry and tombstones", () => {
     assert.equal(registry.get(bulk.id)?.pruned, false);
   });
 
+  test("supersede-pruning escalates superseded parents only at compact pressure", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const bigText = Array.from(
+      { length: 600 },
+      (_, index) => `line ${index} padded so the read splits into a bulk part`,
+    ).join("\n");
+    const parent = addChunk(registry, config, "read_a", "read", bigText, {
+      path: "src/same.ts",
+      startLine: 1,
+      endLine: 600,
+    });
+    const bulk = registry.all().find((chunk) => chunk.parentId === parent.id);
+    assert.ok(bulk);
+    // Newer read overlaps the parent (1-600) but not its bulk part (33-600).
+    const newer = addChunk(registry, config, "read_b", "read", "header re-read", {
+      path: "src/same.ts",
+      startLine: 1,
+      endLine: 32,
+    });
+
+    // Below compact pressure the parent-with-children is protected.
+    const low = pruneSupersededAfterCollect(registry, newer, config, 50);
+    assert.equal(low.pruned.length, 0);
+    assert.equal(registry.get(parent.id)?.pruned, false);
+
+    // At compact pressure the overlapping read supersedes the parent, which
+    // cascades to its bulk part.
+    const high = pruneSupersededAfterCollect(registry, newer, config, 92);
+    assert.ok(high.pruned.some((result) => result.id === parent.id));
+    assert.equal(registry.get(parent.id)?.pruned, true);
+    assert.equal(registry.get(bulk.id)?.pruned, true);
+  });
+
+  test("evictAbsentFromContext prunes seen main-scope chunks no longer in the transcript", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const kept = addChunk(registry, config, "kept", "code_search", "src/kept:1\n".repeat(120));
+    const gone = addChunk(registry, config, "gone", "code_search", "src/gone:1\n".repeat(120));
+    registry.markSeenByToolCallId("kept");
+    registry.markSeenByToolCallId("gone");
+
+    const evicted = registry.evictAbsentFromContext(new Set(["kept"]));
+
+    assert.deepEqual(
+      evicted.map((result) => result.id),
+      [gone.id],
+    );
+    assert.equal(registry.get(gone.id)?.pruned, true);
+    assert.equal(registry.get(kept.id)?.pruned, false);
+  });
+
+  test("evictAbsentFromContext skips eviction when no main-scope chunk is present", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const chunk = addChunk(registry, config, "main_1", "code_search", "src/main:1\n".repeat(120));
+    registry.markSeenByToolCallId("main_1");
+
+    // No tracked main-scope chunk is present (e.g. a subagent context event):
+    // must not evict main chunks that are merely absent from this context.
+    const evicted = registry.evictAbsentFromContext(new Set(["subagent_only"]));
+
+    assert.deepEqual(evicted, []);
+    assert.equal(registry.get(chunk.id)?.pruned, false);
+  });
+
   test("coalesces full tombstones even when other messages have pruned parts", () => {
     const config = testConfig({ tombstones: { coalesceMinChunks: 3 } });
     const registry = new ChunkRegistry();
@@ -2083,6 +2149,58 @@ describe("extension integration", () => {
 
     const after = pi.entries.at(-1)?.data?.state?.continuationManifest;
     assert.equal(after, undefined, "session_compact should clear the stale manifest");
+  });
+
+  test("context handler evicts main-scope chunks summarized out of the transcript", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+    await pi.handlers.tool_result?.({
+      toolCallId: "survivor",
+      toolName: "code_search",
+      content: textBlock("src/survivor:1\n".repeat(120)),
+    });
+    await pi.handlers.tool_result?.({
+      toolCallId: "summarized",
+      toolName: "code_search",
+      content: textBlock("src/summarized:1\n".repeat(120)),
+    });
+    const lowUsage = () => ({
+      getContextUsage: () => ({ tokens: 1_000, contextWindow: 10_000, percent: 10 }),
+    });
+
+    // Both present -> both seen, nothing evicted (low pressure, no auto-prune).
+    await pi.handlers.context?.(
+      {
+        messages: [
+          { role: "toolResult", toolCallId: "survivor", content: textBlock("x") },
+          { role: "toolResult", toolCallId: "summarized", content: textBlock("x") },
+        ],
+      },
+      lowUsage(),
+    );
+
+    // Compaction drops "summarized" from the transcript; "survivor" remains.
+    await pi.handlers.context?.(
+      {
+        messages: [{ role: "toolResult", toolCallId: "survivor", content: textBlock("x") }],
+      },
+      lowUsage(),
+    );
+
+    const list = await pi.tools.list_context_chunks.execute("list", {
+      sortBy: "age",
+      limit: 10,
+    });
+    const byCall = new Map(
+      (
+        list.details.chunks as Array<{
+          source?: { toolCallId?: string };
+          pruned: boolean;
+        }>
+      ).map((chunk) => [chunk.source?.toolCallId, chunk.pruned]),
+    );
+    assert.equal(byCall.get("summarized"), true);
+    assert.equal(byCall.get("survivor"), false);
   });
 
   test("context hook coalesces extreme pruned tombstone overhead without mutating transcript messages", async () => {

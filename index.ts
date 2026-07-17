@@ -88,14 +88,15 @@ export default function (pi: ExtensionAPI) {
     // manifest we prepared against the pre-compaction state no longer
     // describes the surviving context. Drop it so context_pressure does not
     // report a stale manifest. Tracked chunks stay restorable from cache.
-    // (Active chunks summarized away are reconciled lazily by later pruning.)
+    // (Active chunks summarized away are reconciled by the context handler's
+    // transcript eviction on the next turn.)
     if (continuationManifest) {
       continuationManifest = undefined;
       persistState();
     }
   });
 
-  pi.on("tool_result", async (event) => {
+  pi.on("tool_result", async (event, ctx) => {
     const collected = collectToolResult({
       toolCallId: String(event.toolCallId),
       toolName: String(event.toolName),
@@ -108,7 +109,8 @@ export default function (pi: ExtensionAPI) {
     if (collected) {
       const chunk = registry.addCollected(collected);
       telemetry.recordCollected(chunk);
-      const stalePrune = pruneSupersededAfterCollect(registry, chunk, config);
+      const pressurePercent = contextPercent(getUsage(ctx));
+      const stalePrune = pruneSupersededAfterCollect(registry, chunk, config, pressurePercent);
       telemetry.recordActionResults("auto_prune", stalePrune.pruned, "superseded on ingest");
       const reamerxPrune = pruneReamerxExploratoryAfterTerminal(registry, chunk, config);
       telemetry.recordActionResults(
@@ -143,10 +145,22 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    const presentToolCallIds = new Set<string>();
     for (const message of event.messages ?? []) {
       if (message.role === "toolResult" && message.toolCallId) {
-        registry.markSeenByToolCallId(String(message.toolCallId));
+        const toolCallId = String(message.toolCallId);
+        presentToolCallIds.add(toolCallId);
+        registry.markSeenByToolCallId(toolCallId);
       }
+    }
+    // Reconcile against the live transcript: evict active main-scope chunks
+    // that were seen but are no longer present (e.g. summarized away by
+    // compaction). evictAbsentFromContext requires at least one main-scope
+    // seen chunk still present, so a subagent's context event (which has none)
+    // never evicts main chunks.
+    const evicted = registry.evictAbsentFromContext(presentToolCallIds);
+    if (evicted.some((result) => result.status === "pruned")) {
+      persistState();
     }
 
     if (ctx?.hasUI) {

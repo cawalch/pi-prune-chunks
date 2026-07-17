@@ -294,6 +294,38 @@ export class ChunkRegistry {
     return { id, status: "restored", tokens: chunk.tokenEstimate, restoreMode: mode };
   }
 
+  /**
+   * Prune active, main-scope chunks that were previously seen but whose
+   * toolCallId is no longer in the transcript (e.g. summarized away by
+   * compaction). Safe against subagent contexts: if NO main-scope seen chunk
+   * is still present, this is a different context, so nothing is evicted.
+   */
+  evictAbsentFromContext(
+    presentToolCallIds: Set<string>,
+    reason = "evicted from context",
+  ): ChunkActionResult[] {
+    const mainSeen = this.active().filter(
+      (chunk) =>
+        (chunk.scope?.scope ?? "main") === "main" &&
+        chunk.lastSeenAt != null &&
+        !!chunk.source?.toolCallId,
+    );
+    if (mainSeen.length === 0) return [];
+    const presentCount = mainSeen.filter((chunk) =>
+      presentToolCallIds.has(chunk.source?.toolCallId ?? ""),
+    ).length;
+    if (presentCount === 0) return [];
+    const absent = mainSeen.filter(
+      (chunk) => !presentToolCallIds.has(chunk.source?.toolCallId ?? ""),
+    );
+    if (absent.length === 0) return [];
+    return this.prune(
+      absent.map((chunk) => chunk.id),
+      reason,
+      "auto_pruned",
+    );
+  }
+
   pin(ids: string[], reason?: string): ChunkActionResult[] {
     const now = Date.now();
     return ids.map((id) => {

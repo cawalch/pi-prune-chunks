@@ -170,6 +170,7 @@ export function pruneSupersededAfterCollect(
   registry: ChunkRegistry,
   chunk: ContextChunk,
   config: PruneChunksConfig,
+  pressurePercent?: number | null,
 ): SupersededPruneResult {
   if (!config.autoPrune.enabled || !config.autoPrune.pruneSupersededOnIngest) {
     return { pruned: [], savedTokens: 0 };
@@ -182,7 +183,13 @@ export function pruneSupersededAfterCollect(
 
   for (const previous of registry.active()) {
     if (previous.id === chunk.id) continue;
-    if (!previous.part && registry.hasChildren(previous.id)) continue;
+    if (
+      !previous.part &&
+      registry.hasChildren(previous.id) &&
+      !canPruneParentWithChildren(previous, pressurePercent, config)
+    ) {
+      continue;
+    }
     if (previous.pinned || previous.risk === "high" || !previous.restoreAvailable) continue;
 
     const reason = supersededReason(previous, chunk);
@@ -356,7 +363,7 @@ export function blockedPruneCandidates(
   return blocked.slice(0, Math.max(0, options.limit ?? 10));
 }
 
-function canPruneParentWithChildren(
+export function canPruneParentWithChildren(
   chunk: ContextChunk,
   pressurePercent: number | null | undefined,
   config: PruneChunksConfig,
