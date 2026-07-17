@@ -230,13 +230,41 @@ export class ChunkRegistry {
     chunk.updatedAt = now;
   }
 
+  /**
+   * Expand ids to a parent plus its parts. Pruning or restoring a parent
+   * acts on the whole family; a single part id resolves to just itself, so
+   * partial pruning of a bulk section still works.
+   */
+  familyOf(ids: string[]): string[] {
+    const ordered: string[] = [];
+    const seen = new Set<string>();
+    for (const id of ids) {
+      if (this.chunks.has(id) && !seen.has(id)) {
+        seen.add(id);
+        ordered.push(id);
+      }
+    }
+    const idSet = new Set(ids);
+    for (const chunk of this.chunks.values()) {
+      if (chunk.parentId && idSet.has(chunk.parentId) && !seen.has(chunk.id)) {
+        seen.add(chunk.id);
+        ordered.push(chunk.id);
+      }
+    }
+    return ordered;
+  }
+
   prune(
     ids: string[],
     reason?: string,
     action: "pruned" | "auto_pruned" = "pruned",
   ): ChunkActionResult[] {
     const now = Date.now();
-    return ids.map((id) => {
+    // Cascade to parts: pruning a parent removes the whole tool result, so its
+    // bulk part must leave active accounting too. Otherwise a fully-pruned
+    // parent leaves its part active (and, since markSeen resolves only the
+    // parent, never auto-prunable), inflating activeTokens indefinitely.
+    return this.familyOf(ids).map((id) => {
       const chunk = this.chunks.get(id);
       if (!chunk) return { id, status: "not_found", tokens: 0 };
       if (chunk.pruned) return { id, status: "already_pruned", tokens: 0 };

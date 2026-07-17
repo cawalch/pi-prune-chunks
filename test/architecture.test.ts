@@ -560,6 +560,87 @@ describe("registry and tombstones", () => {
     assert.equal(parentRestore.status, "restored");
   });
 
+  test("pruning a parent cascades to its parts and moves all tokens to pruned", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const text = [
+      "header kept line",
+      ...Array.from(
+        { length: 500 },
+        (_, index) => `bulk line ${index} padded to force a partial chunk`,
+      ),
+    ].join("\n");
+    const parent = addChunk(registry, config, "read_tool", "read", text, { path: "src/big.ts" });
+    const bulk = registry.all().find((chunk) => chunk.parentId === parent.id);
+    assert.ok(bulk);
+    assert.ok(bulk.tokenEstimate > parent.tokenEstimate);
+    const before = registry.summary();
+
+    const results = registry.prune([parent.id], "full prune parent");
+
+    assert.deepEqual(new Set(results.map((result) => result.id)), new Set([parent.id, bulk.id]));
+    assert.equal(registry.get(parent.id)?.pruned, true);
+    assert.equal(registry.get(bulk.id)?.pruned, true);
+    const after = registry.summary();
+    assert.equal(
+      after.activeTokens,
+      before.activeTokens - parent.tokenEstimate - bulk.tokenEstimate,
+    );
+    assert.equal(
+      after.prunedTokens,
+      before.prunedTokens + parent.tokenEstimate + bulk.tokenEstimate,
+    );
+  });
+
+  test("pruning a single part does not cascade to its parent", () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const text = [
+      "header kept line",
+      ...Array.from(
+        { length: 500 },
+        (_, index) => `bulk line ${index} padded to force a partial chunk`,
+      ),
+    ].join("\n");
+    const parent = addChunk(registry, config, "read_tool", "read", text, { path: "src/big.ts" });
+    const bulk = registry.all().find((chunk) => chunk.parentId === parent.id);
+    assert.ok(bulk);
+
+    const results = registry.prune([bulk.id], "partial prune");
+
+    assert.deepEqual(
+      results.map((result) => result.id),
+      [bulk.id],
+    );
+    assert.equal(registry.get(bulk.id)?.pruned, true);
+    assert.equal(registry.get(parent.id)?.pruned, false);
+  });
+
+  test("restoring a parent cascades to its parts", async () => {
+    const config = testConfig();
+    const registry = new ChunkRegistry();
+    const text = [
+      "header kept line",
+      ...Array.from(
+        { length: 500 },
+        (_, index) => `bulk line ${index} padded to force a partial chunk`,
+      ),
+    ].join("\n");
+    const parent = addChunk(registry, config, "read_tool", "read", text, { path: "src/big.ts" });
+    const bulk = registry.all().find((chunk) => chunk.parentId === parent.id);
+    assert.ok(bulk);
+    registry.prune([parent.id], "full prune");
+
+    const results = await restoreChunks(registry, [parent.id], config);
+    const restored = results
+      .filter((result) => result.status === "restored")
+      .map((result) => result.id);
+
+    assert.deepEqual(new Set(restored), new Set([parent.id, bulk.id]));
+    assert.equal(registry.get(parent.id)?.pruned, false);
+    assert.equal(registry.get(bulk.id)?.pruned, false);
+  });
+
   test("coalesces full tombstones even when other messages have pruned parts", () => {
     const config = testConfig({ tombstones: { coalesceMinChunks: 3 } });
     const registry = new ChunkRegistry();
@@ -1980,6 +2061,28 @@ describe("extension integration", () => {
 
     const tombstone = contextResult?.messages[0].content[0].text ?? "";
     assert.match(tombstone, new RegExp(`^\\[pruned:${id} search ~\\d+t; restore_chunks\\]$`));
+  });
+
+  test("session_compact clears the stale continuation manifest", async () => {
+    const pi = createMockPi(testConfig());
+    extension(pi as never);
+    await pi.handlers.tool_result?.({
+      toolCallId: "manifest_tool",
+      toolName: "code_search",
+      content: textBlock("src/a.ts:1: hit\n".repeat(120)),
+    });
+    // High pressure prepares a continuation manifest and persists it.
+    await pi.handlers.context?.(
+      { messages: [{ role: "toolResult", toolCallId: "manifest_tool", content: textBlock("x") }] },
+      { getContextUsage: () => ({ tokens: 9_500, contextWindow: 10_000, percent: 95 }) },
+    );
+    const before = pi.entries.at(-1)?.data?.state?.continuationManifest;
+    assert.ok(before, "context event at imminent pressure should prepare a manifest");
+
+    await pi.handlers.session_compact?.({});
+
+    const after = pi.entries.at(-1)?.data?.state?.continuationManifest;
+    assert.equal(after, undefined, "session_compact should clear the stale manifest");
   });
 
   test("context hook coalesces extreme pruned tombstone overhead without mutating transcript messages", async () => {
