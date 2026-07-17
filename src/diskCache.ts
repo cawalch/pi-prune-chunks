@@ -80,6 +80,10 @@ export class DiskChunkContentCache implements ChunkContentCache {
     this.enforceLimits();
   }
 
+  // Removes the id->blob index only. The (content-addressed, possibly shared)
+  // blob is reclaimed by removeUnreferencedBlobs() during enforceLimits() on
+  // the next set(). delete() is only called from within enforceLimits today
+  // (expiry/trim), so orphans never accumulate outside that sweep.
   delete(id: string): void {
     rmSync(this.indexPath(id), { force: true });
   }
