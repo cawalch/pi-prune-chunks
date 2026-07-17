@@ -14,6 +14,7 @@ import {
 } from "../src/collector";
 import { mergeConfig } from "../src/config";
 import { CompositeChunkContentCache, DiskChunkContentCache } from "../src/diskCache";
+import { applyPartTombstonesToContent } from "../src/parts";
 import {
   autoPrune,
   pressureSummary,
@@ -31,7 +32,12 @@ import {
   telemetryTombstoneTokens,
 } from "../src/telemetry";
 import { applyPrunedTombstones, tombstoneFor } from "../src/tombstones";
-import type { ContentBlock, ContextUsage, PruneChunksConfig } from "../src/types";
+import type {
+  ContentBlock,
+  ContextChunk,
+  ContextUsage,
+  PruneChunksConfig,
+} from "../src/types";
 
 function textBlock(text: string): ContentBlock[] {
   return [{ type: "text", text }];
@@ -508,9 +514,15 @@ describe("registry and tombstones", () => {
 
     assert.equal(applied.coalesced, true);
     assert.equal(applied.coalescedCount, 2);
-    assert.equal(applied.messages.length, 2);
+    // Every toolResult is preserved (none dropped) so tool_use stays paired.
+    assert.equal(applied.messages.length, 3);
+    assert.deepEqual(
+      applied.messages.map((message) => message.toolCallId),
+      ["tool_0", "tool_1", "tool_2"],
+    );
     assert.match(applied.messages[0].content[0].text ?? "", /^\[pruned-manifest:/);
-    assert.match(applied.messages[1].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
+    assert.match(applied.messages[1].content[0].text ?? "", /in pruned-manifest\]$/);
+    assert.match(applied.messages[2].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
   });
 
   test("supports partial pruning and selective child restore", async () => {
@@ -597,11 +609,73 @@ describe("registry and tombstones", () => {
 
     assert.equal(applied.coalesced, true);
     assert.equal(applied.coalescedCount, 2);
-    assert.equal(applied.messages.length, 3);
+    assert.equal(applied.messages.length, 4);
+    assert.equal(applied.messages[0].toolCallId, "partial_tool");
+    assert.equal(applied.messages[1].toolCallId, "full_0");
+    assert.equal(applied.messages[2].toolCallId, "full_1");
+    assert.equal(applied.messages[3].toolCallId, "full_2");
     assert.match(applied.messages[0].content[0].text ?? "", /important header/);
     assert.match(applied.messages[0].content[0].text ?? "", /\[pruned:.*#bulk/);
     assert.match(applied.messages[1].content[0].text ?? "", /^\[pruned-manifest:/);
-    assert.match(applied.messages[2].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
+    assert.match(applied.messages[2].content[0].text ?? "", /in pruned-manifest\]$/);
+    assert.match(applied.messages[3].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
+  });
+
+  test("coalescing never drops toolResult messages so tool_use stays paired", () => {
+    const config = testConfig({ tombstones: { coalesceMinChunks: 3 } });
+    const registry = new ChunkRegistry();
+    const messages: Array<{ role: string; toolCallId: string; content: ContentBlock[] }> = [];
+    for (let index = 0; index < 4; index++) {
+      const toolCallId = `pair_${index}`;
+      const chunk = addChunk(
+        registry,
+        config,
+        toolCallId,
+        "code_search",
+        `src/file-${index}.ts:1: result\n`.repeat(120),
+      );
+      registry.prune([chunk.id], "done");
+      messages.push({ role: "toolResult", toolCallId, content: textBlock("original") });
+    }
+
+    const applied = applyPrunedTombstones(
+      messages,
+      (toolCallId) => registry.prunedForToolCall(toolCallId),
+      config,
+      { coalesce: true },
+    );
+
+    assert.equal(applied.coalesced, true);
+    // Same number of messages out as in: nothing dropped, so every tool_use
+    // still has a paired toolResult.
+    assert.equal(applied.messages.length, messages.length);
+    assert.deepEqual(
+      applied.messages.map((message) => message.toolCallId),
+      ["pair_0", "pair_1", "pair_2", "pair_3"],
+    );
+    assert.match(applied.messages[0].content[0].text ?? "", /^\[pruned-manifest:/);
+    assert.match(applied.messages[1].content[0].text ?? "", /in pruned-manifest\]$/);
+    assert.match(applied.messages[2].content[0].text ?? "", /in pruned-manifest\]$/);
+    assert.match(applied.messages[3].content[0].text ?? "", /^\[pruned:.* restore_chunks\]$/);
+  });
+
+  test("applyPartTombstonesToContent replaces only the part's inclusive line range", () => {
+    const lines = Array.from({ length: 10 }, (_, index) => `L${index + 1}`);
+    const part = {
+      id: "pc_0001_abc#mid",
+      part: { index: 0, label: "mid", lineStart: 3, lineEnd: 5, role: "bulk" },
+    } as unknown as ContextChunk;
+    const result = applyPartTombstonesToContent(
+      textBlock(lines.join("\n")),
+      [part],
+      () => "<<TOMB>>",
+    );
+    // Lines 3-5 replaced by the tombstone; lines 1-2 and 6-10 untouched
+    // (previously line 6 was also eaten by an off-by-one in the splice count).
+    assert.equal(
+      (result[0] as { text?: string }).text ?? "",
+      "L1\nL2\n<<TOMB>>\nL6\nL7\nL8\nL9\nL10",
+    );
   });
 });
 
@@ -1981,14 +2055,23 @@ describe("extension integration", () => {
     assert.ok(contextResult);
 
     const providerMessages = contextResult.messages as typeof originalMessages;
-    assert.ok(
-      providerMessages.length < originalMessages.length / 4,
-      `expected coalescing to reduce ${originalMessages.length} messages, got ${providerMessages.length}`,
+    // Coalescing collapses tombstone *content*, not message count: dropping a
+    // toolResult orphans its preceding tool_use and the provider rejects the
+    // turn. All 100 toolResults are preserved; only the overhead shrinks.
+    assert.equal(
+      providerMessages.length,
+      originalMessages.length,
+      `coalescing must preserve all ${originalMessages.length} toolResult messages`,
     );
     assert.equal(originalMessages.length, 100);
     assert.equal(originalMessages[0].content[0].text, `src/file-0.ts:1: result 0\n`.repeat(80));
 
     const providerText = providerMessages.map(messageText).join("\n");
+    const originalText = originalMessages.map(messageText).join("\n");
+    assert.ok(
+      providerText.length < originalText.length / 4,
+      `expected coalescing to cut overhead, provider ${providerText.length} vs original ${originalText.length}`,
+    );
     assert.match(providerText, /coalesc|manifest|pruned/i);
     assert.ok(providerText.includes("restore_chunks"));
     assert.ok(providerText.includes(idsToPrune[0]));

@@ -140,15 +140,17 @@ function applyCoalescedPrunedTombstones<
     const message = messages[index];
     const chunk = coalescedByIndex.get(index);
     if (chunk) {
-      if (index === manifestIndex) {
-        output.push({
-          ...message,
-          content: coalescedManifest(
-            coalesced.map((item) => item.chunk),
-            config,
-          ),
-        });
-      }
+      // Keep every coalesced toolResult in place (never drop it). Dropping a
+      // toolResult orphans its preceding tool_use and the provider rejects the
+      // request; instead collapse non-manifest members to a minimal marker so
+      // the manifest still carries the summary and token savings.
+      output.push({
+        ...message,
+        content:
+          index === manifestIndex
+            ? coalescedManifest(coalesced.map((item) => item.chunk), config)
+            : coalescedMemberTombstone(chunk),
+      });
       continue;
     }
 
@@ -198,6 +200,15 @@ function coalescedManifest(chunks: ContextChunk[], config: PruneChunksConfig): C
       text:
         `[pruned-manifest: ${chunks.length} older chunks ~${totalTokens}t total; ` +
         `${entries}${omittedText}; restore_chunks by id]`,
+    },
+  ];
+}
+
+function coalescedMemberTombstone(chunk: ContextChunk): ContentBlock[] {
+  return [
+    {
+      type: "text",
+      text: `[pruned:${chunk.id} ${chunk.kind}; in pruned-manifest]`,
     },
   ];
 }

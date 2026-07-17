@@ -71,7 +71,10 @@ export function applyPartTombstonesToContent(
   for (const chunk of sorted) {
     const start = Math.max(0, (chunk.part?.lineStart ?? 1) - 1);
     const end = Math.max(start, chunk.part?.lineEnd ?? start + 1);
-    lines.splice(start, end - start + 1, tombstoneText(chunk));
+    // lineStart/lineEnd are 1-based inclusive; deleteCount is end - start
+    // (= lineEnd - lineStart + 1). The previous `+ 1` ate one extra line after
+    // lineEnd for any non-tail part.
+    lines.splice(start, end - start, tombstoneText(chunk));
   }
 
   return [{ type: "text", text: lines.join("\n") }];
