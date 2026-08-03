@@ -1,50 +1,47 @@
 # Architecture
 
-`pi-prune-chunks` is split into five layers:
+v0.2 is a provider-copy hygiene layer, not an agent workflow and not a
+replacement for Pi compaction.
 
-1. Collector: turns large text tool results into typed chunk candidates and
-   deterministic decision cards. When explicitly configured, it can accept a
-   bounded externally supplied model decision-card response and falls back to the
-   heuristic card if the response is missing or invalid.
-2. Registry: owns `ContextChunk` metadata, stable IDs, pin/prune state, audit
-   events, and configured content caches.
-3. Pruner: scores safe candidates and applies manual or automatic pruning.
-4. Tombstones: renders compact provider-context replacements with decision-card
-   previews under the configured summary budget. For partial child chunks, it
-   replaces only the child's source line range with a tombstone and keeps the
-   parent prefix/failure lines visible.
-5. Continuation manifest: when provider pressure reaches the compact tombstone
-   band, pins carry-forward failures/diffs/modified-path chunks and persists a
-   compact task-state plus ID/card/restore-hint manifest to help Pi compaction
-   and resume.
-6. Scope isolation: when Pi tool events include run/agent metadata, chunks carry
-   `main`, `subagent`, or `chain` scope so child-agent exploration can be listed,
-   pruned, and restored independently from parent working context.
-5. Restorer: restores from memory first, then optional durable disk cache, then
-   source file ranges when available.
+## Data flow
 
-The extension entry point wires these layers into Pi hooks:
+1. `tool_result` classifies sufficiently large output and records compact
+   metadata plus exact content in session memory.
+2. Provable redundancy can retire a result immediately. Unique output is merely
+   tracked.
+3. The `context` hook reconciles results removed by Pi compaction, enforces the
+   bounded tool-output budget, and evaluates the one-shot emergency safeguard.
+4. Full retired exchanges are removed as a validated tool-call/result pair from
+   the provider copy. A bulk child can instead be replaced by a neutral partial
+   marker.
+5. The original messages and saved transcript remain untouched.
 
-- `tool_result` collects chunks.
-- `context` auto-prunes when configured and replaces pruned tool-result messages
-  in the copied provider context.
-- tools and commands expose list, prune, restore, pin, unpin, and pressure flows.
-  `/prune-restore` is a command wrapper over the same restore path as the
-  `restore_chunks` tool.
+The context hook returns nothing when no provider rewrite is needed. It never
+adds management prompt content and never calls `ctx.compact()`.
 
-The saved transcript remains the source of truth. Pruning state is metadata over
-that transcript, not a destructive transcript edit. Non-privacy profiles enable a
-compressed content-addressed blob cache by default for exact restore after a Pi
-process restart; use `profile: "privacy-max"` or `restore.diskCache.enabled:
-false` for memory-only raw content.
+## Registry and persistence
 
-Large collected chunks can create child part chunks such as `#bulk`. The parent
-keeps the exact full content for full restore, while child chunks let the pruner
-or user remove a bulky tail without losing the high-signal prefix. Restoring the
-child ID makes the original provider-bound tool result visible again on the next
-context pass.
+Chunk IDs are stable hashes of the tool-call ID, tool name, and exact result.
+The registry is rebuilt from saved transcript messages on resume. Small v2
+custom entries contain only state transitions (`active` or `pruned`) and are
+replayed afterward. Full registries, audit logs, telemetry snapshots, and raw
+output are not appended to the transcript.
 
-The extension only manages tracked tool-result chunks. It reports provider
-tokens outside those chunks, but it does not compress the system prompt or
-ordinary conversation history. Long sessions that are dominated by non-chunk
-tokens need a separate conversation-level compression layer.
+Pi's transcript is authoritative. Compaction is observed for telemetry, then
+live-context reconciliation retires tracked results that Pi removed from the
+provider history.
+
+## Archive layer
+
+Active content stays in memory. Retirement schedules an archive operation;
+disk writes are serialized, gzip-compressed, content-addressed, and atomically
+renamed. An in-memory ID index avoids a directory scan on each operation.
+Cleanup runs at startup, every 64 archives, or when the configured byte bound is
+crossed.
+
+## Telemetry and UI
+
+Telemetry is aggregate and memory-only. It records effective provider-token
+savings, retirement cause, rewrite time, archive time, restores, fallback
+markers, and Pi compactions. No raw output is included. Normal passes generate
+no notification; a single compact status line reports the working-set budget.

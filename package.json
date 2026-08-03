@@ -1,7 +1,7 @@
 {
   "name": "pi-prune-chunks",
-  "version": "0.1.0",
-  "description": "Pi extension that parks bulky tool output behind restorable context cards",
+  "version": "0.2.0",
+  "description": "Invisible bounded working-set hygiene for bulky Pi tool output",
   "main": "index.ts",
   "files": [
     "index.ts",
@@ -20,26 +20,24 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "check": "biome check . && npm run typecheck && npm run test:coverage",
-    "bench:context-savings": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/context-savings.js",
-    "bench:durable-store": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/durable-store-value.js",
-    "bench:policy-compare": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/policy-compare.js",
-    "bench:e2e-pruning": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/e2e-pruning-impact.js",
+    "bench:replay": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/replay-comparison.js",
+    "bench:cache": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/cache-archive.js",
+    "bench:churn": "rm -rf .tmp-bench && tsc -p bench/tsconfig.json && node .tmp-bench/bench/churn-replay.js",
+    "bench:e2e-pruning": "npm run bench:replay",
     "pack:dry": "npm pack --dry-run"
   },
   "keywords": [
     "pi",
     "pi-coding-agent",
     "pi-extension",
-    "context-management",
-    "pruning",
+    "tool-output-hygiene",
+    "context-working-set",
     "reamer"
   ],
   "author": "cawalch",
   "license": "MIT",
   "type": "commonjs",
-  "dependencies": {
-    "typebox": "^1.1.38"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@biomejs/biome": "2.4.14",
     "@types/node": "^24.10.0",

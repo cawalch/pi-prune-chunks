@@ -1,4 +1,3 @@
-import { buildDecisionCard } from "./cards";
 import {
   compactWhitespace,
   contentText,
@@ -24,7 +23,6 @@ type ToolResultInput = {
   content: ContentBlock[];
   params?: Record<string, unknown>;
   scope?: ChunkScope;
-  modelCardResponse?: unknown;
   config: PruneChunksConfig;
 };
 
@@ -175,16 +173,7 @@ export function collectToolResult(input: ToolResultInput): CollectedChunk | null
   const kind = classifyKind(input.toolName, text, input.params);
   const source = inferSource(input.toolCallId, input.toolName, text, input.params);
   const risk = classifyRisk(kind, text, source);
-  const summary = summarizeText(text, input.config.tombstones.maxSummaryChars);
-  const decisionCard = buildDecisionCard({
-    kind,
-    toolName: input.toolName,
-    text,
-    source,
-    maxChars: input.config.tombstones.maxSummaryChars,
-    modelCardResponse: input.modelCardResponse,
-    decisionCards: input.config.decisionCards,
-  });
+  const summary = summarizeText(text, input.config.track.maxSummaryChars);
   const label = makeLabel(input.toolName, kind, text, source);
 
   return {
@@ -197,7 +186,6 @@ export function collectToolResult(input: ToolResultInput): CollectedChunk | null
     risk,
     tokenEstimate,
     summary,
-    decisionCard,
     source,
     scope: input.scope,
   };
@@ -402,7 +390,7 @@ function commandFromToolOutput(toolName: string, text: string): string | undefin
 }
 
 function hasCurrentFailureSignal(text: string): boolean {
-  return /\b(FAIL|FAILED|Traceback|panic:|Exception|SyntaxError|TypeError|ReferenceError|compilation error|Command failed)\b/.test(
+  return /(?:\b(?:FAIL|FAILED|Traceback|panic:|Exception|SyntaxError|TypeError|ReferenceError|compilation error|Command failed)\b|\bError:)/.test(
     text,
   );
 }

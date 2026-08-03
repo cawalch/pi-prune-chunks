@@ -6,5 +6,5 @@
     "rootDir": "..",
     "sourceMap": false
   },
-  "include": ["../src/**/*.ts", "./**/*.ts", "../pi.d.ts"]
+  "include": ["../index.ts", "../src/**/*.ts", "./**/*.ts", "../pi.d.ts"]
 }

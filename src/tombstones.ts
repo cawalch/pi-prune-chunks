@@ -1,246 +1,148 @@
-import { compactDecisionCard } from "./cards";
 import { applyPartTombstonesToContent } from "./parts";
-import { truncateText } from "./text";
-import type { ContentBlock, ContextChunk, PruneChunksConfig } from "./types";
+import type { ChunkRegistry } from "./registry";
+import type { ContentBlock } from "./types";
 
-export type TombstoneOptions = {
-  compact?: boolean;
-  coalesce?: boolean;
+const RETIRED_MARKER = "[historical tool output retired]";
+const PARTIAL_MARKER = "[older bulk output retired]";
+
+type ContextMessage = {
+  role: string;
+  toolCallId?: string;
+  content?: ContentBlock[];
+  [key: string]: unknown;
 };
 
-export function tombstoneFor(
-  chunk: ContextChunk,
-  config: PruneChunksConfig,
-  options: TombstoneOptions = {},
-): ContentBlock[] {
-  if (options.compact) {
-    return [
-      {
-        type: "text",
-        text: `[pruned:${chunk.id} ${chunk.kind} ~${chunk.tokenEstimate}t; restore_chunks]`,
-      },
-    ];
-  }
+export type RewriteResult<T extends ContextMessage> = {
+  messages: T[];
+  modified: boolean;
+  removedExchanges: number;
+  fallbackMarkers: number;
+  partialMarkers: number;
+};
 
-  const source = sourceText(chunk);
-  const card = cardText(chunk, config);
-  const restore = config.tombstones.includeRestoreHint
-    ? ` restore="restore_chunks({ids:['${chunk.id}']})"`
-    : "";
-
-  return [
-    {
-      type: "text",
-      text:
-        `[pruned:${chunk.id} ${chunk.kind}/${chunk.toolName} "${escapeField(chunk.label)}" ` +
-        `~${chunk.tokenEstimate}t${source}${card}${restore}]`,
-    },
-  ];
-}
-
-export function applyPrunedTombstones<
-  T extends { role: string; toolCallId?: string; content?: ContentBlock[] },
->(
+/**
+ * Remove a retired tool call and its result together from the provider copy.
+ * The saved transcript is never mutated. If pairing is incomplete, retain a
+ * neutral result marker so provider tool-call invariants remain valid.
+ */
+export function rewriteRetiredExchanges<T extends ContextMessage>(
   messages: T[],
-  getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
-  config: PruneChunksConfig,
-  options: TombstoneOptions = {},
-  getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
-): { messages: T[]; modified: boolean; coalesced?: boolean; coalescedCount?: number } {
-  const pruned = prunedMessages(messages, getPrunedChunk);
-  const minCoalescedChunks = Math.max(2, config.tombstones.coalesceMinChunks);
-  if (options.coalesce || pruned.length >= minCoalescedChunks) {
-    return applyCoalescedPrunedTombstones(
-      messages,
-      getPrunedChunk,
-      config,
-      options,
-      pruned,
-      getPrunedParts,
-    );
+  registry: ChunkRegistry,
+): RewriteResult<T> {
+  const retiredIds = new Set<string>();
+  for (const chunk of registry.all()) {
+    if (!chunk.parentId && chunk.pruned && chunk.source?.toolCallId) {
+      retiredIds.add(chunk.source.toolCallId);
+    }
   }
-
-  return applyIndividualPrunedTombstones(messages, getPrunedChunk, config, options, getPrunedParts);
-}
-
-function applyIndividualPrunedTombstones<
-  T extends { role: string; toolCallId?: string; content?: ContentBlock[] },
->(
-  messages: T[],
-  getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
-  config: PruneChunksConfig,
-  options: TombstoneOptions,
-  getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
-): { messages: T[]; modified: boolean } {
-  let modified = false;
-  const mapped = messages.map((message) => {
-    const replacement = tombstonedMessage(message, getPrunedChunk, config, options, getPrunedParts);
-    if (replacement !== message) modified = true;
-    return replacement;
-  });
-  return { messages: mapped, modified };
-}
-
-function tombstonedMessage<
-  T extends { role: string; toolCallId?: string; content?: ContentBlock[] },
->(
-  message: T,
-  getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
-  config: PruneChunksConfig,
-  options: TombstoneOptions,
-  getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
-): T {
-  if (message.role !== "toolResult" || !message.toolCallId) return message;
-  const chunk = getPrunedChunk(message.toolCallId);
-  const prunedParts = getPrunedParts(message.toolCallId);
-  if (!chunk && prunedParts.length === 0) return message;
-  if (chunk) {
+  if (retiredIds.size === 0 && !registry.all().some((chunk) => chunk.parentId && chunk.pruned)) {
     return {
-      ...message,
-      content: tombstoneFor(chunk, config, options),
+      messages,
+      modified: false,
+      removedExchanges: 0,
+      fallbackMarkers: 0,
+      partialMarkers: 0,
     };
   }
-  return {
-    ...message,
-    content: applyPartTombstonesToContent(message.content ?? [], prunedParts, (part) =>
-      tombstoneFor(part, config, options)
-        .map((block) => block.text ?? "")
-        .join("\n"),
+
+  const callCounts = new Map<string, number>();
+  const resultCounts = new Map<string, number>();
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      for (const block of message.content ?? []) {
+        if (block.type === "toolCall" && typeof block.id === "string") {
+          callCounts.set(block.id, (callCounts.get(block.id) ?? 0) + 1);
+        }
+      }
+    } else if (message.role === "toolResult" && message.toolCallId) {
+      const id = String(message.toolCallId);
+      resultCounts.set(id, (resultCounts.get(id) ?? 0) + 1);
+    }
+  }
+
+  const removable = new Set(
+    [...retiredIds].filter((id) => callCounts.get(id) === 1 && resultCounts.get(id) === 1),
+  );
+  const malformedPairs = new Set(
+    [...retiredIds].filter(
+      (id) =>
+        (callCounts.get(id) ?? 0) > 0 && (resultCounts.get(id) ?? 0) > 0 && !removable.has(id),
     ),
-  };
-}
-
-function applyCoalescedPrunedTombstones<
-  T extends { role: string; toolCallId?: string; content?: ContentBlock[] },
->(
-  messages: T[],
-  getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
-  config: PruneChunksConfig,
-  options: TombstoneOptions,
-  pruned = prunedMessages(messages, getPrunedChunk),
-  getPrunedParts: (toolCallId: string) => ContextChunk[] = () => [],
-): { messages: T[]; modified: boolean; coalesced?: boolean; coalescedCount?: number } {
-  if (pruned.length <= 1) {
-    return applyIndividualPrunedTombstones(
-      messages,
-      getPrunedChunk,
-      config,
-      options,
-      getPrunedParts,
-    );
-  }
-
-  const newestPruned = pruned[pruned.length - 1];
-  const coalesced = pruned.slice(0, -1);
-  const coalescedByIndex = new Map(coalesced.map((item) => [item.index, item.chunk]));
-  const manifestIndex = coalesced[0]?.index;
+  );
+  const retiredCallsWithoutResults = new Set(
+    [...retiredIds].filter((id) => (callCounts.get(id) ?? 0) > 0 && !resultCounts.has(id)),
+  );
+  const retiredResultsWithoutCalls = new Set(
+    [...retiredIds].filter((id) => (resultCounts.get(id) ?? 0) > 0 && !callCounts.has(id)),
+  );
   const output: T[] = [];
+  let removedExchanges = 0;
+  let fallbackMarkers = 0;
+  let partialMarkers = 0;
+  let modified = false;
+  const retainedMalformedCalls = new Set<string>();
+  const retainedMalformedResults = new Set<string>();
 
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    const chunk = coalescedByIndex.get(index);
-    if (chunk) {
-      // Keep every coalesced toolResult in place (never drop it). Dropping a
-      // toolResult orphans its preceding tool_use and the provider rejects the
-      // request; instead collapse non-manifest members to a minimal marker so
-      // the manifest still carries the summary and token savings.
-      output.push({
-        ...message,
-        content:
-          index === manifestIndex
-            ? coalescedManifest(
-                coalesced.map((item) => item.chunk),
-                config,
-              )
-            : coalescedMemberTombstone(chunk),
+  for (const message of messages) {
+    if (message.role === "assistant" && message.content) {
+      const filtered = message.content.filter((block) => {
+        if (block.type !== "toolCall" || typeof block.id !== "string") return true;
+        if (removable.has(block.id) || retiredCallsWithoutResults.has(block.id)) return false;
+        if (!malformedPairs.has(block.id)) return true;
+        if (retainedMalformedCalls.has(block.id)) return false;
+        retainedMalformedCalls.add(block.id);
+        return true;
       });
-      continue;
+      if (filtered.length !== message.content.length) {
+        modified = true;
+        removedExchanges += message.content.length - filtered.length;
+        if (filtered.length === 0) continue;
+        output.push({ ...message, content: filtered });
+        continue;
+      }
     }
 
-    if (index === newestPruned.index) {
-      output.push({
-        ...message,
-        content: tombstoneFor(newestPruned.chunk, config, { ...options, compact: true }),
-      });
-      continue;
+    if (message.role === "toolResult" && message.toolCallId) {
+      const toolCallId = String(message.toolCallId);
+      if (removable.has(toolCallId)) {
+        modified = true;
+        continue;
+      }
+      if (retiredResultsWithoutCalls.has(toolCallId)) {
+        modified = true;
+        continue;
+      }
+      if (malformedPairs.has(toolCallId)) {
+        modified = true;
+        if (retainedMalformedResults.has(toolCallId)) continue;
+        retainedMalformedResults.add(toolCallId);
+        fallbackMarkers += 1;
+        output.push({ ...message, content: textBlock(RETIRED_MARKER) });
+        continue;
+      }
+      if (retiredIds.has(toolCallId)) {
+        modified = true;
+        fallbackMarkers += 1;
+        output.push({ ...message, content: textBlock(RETIRED_MARKER) });
+        continue;
+      }
+      const parts = registry.prunedPartsForToolCall(toolCallId);
+      if (parts.length > 0) {
+        modified = true;
+        partialMarkers += parts.length;
+        output.push({
+          ...message,
+          content: applyPartTombstonesToContent(message.content ?? [], parts, () => PARTIAL_MARKER),
+        });
+        continue;
+      }
     }
-
-    output.push(tombstonedMessage(message, getPrunedChunk, config, options, getPrunedParts));
+    output.push(message);
   }
 
-  return { messages: output, modified: true, coalesced: true, coalescedCount: coalesced.length };
+  return { messages: output, modified, removedExchanges, fallbackMarkers, partialMarkers };
 }
 
-function prunedMessages<T extends { role: string; toolCallId?: string }>(
-  messages: T[],
-  getPrunedChunk: (toolCallId: string) => ContextChunk | undefined,
-): Array<{ index: number; chunk: ContextChunk }> {
-  const pruned: Array<{ index: number; chunk: ContextChunk }> = [];
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message.role !== "toolResult" || !message.toolCallId) continue;
-    const chunk = getPrunedChunk(message.toolCallId);
-    if (chunk) pruned.push({ index, chunk });
-  }
-  return pruned;
-}
-
-function coalescedManifest(chunks: ContextChunk[], config: PruneChunksConfig): ContentBlock[] {
-  const totalTokens = chunks.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
-  const maxEntries = Math.max(1, config.tombstones.maxCoalescedEntries);
-  const listed = chunks.slice(0, maxEntries);
-  const omitted = chunks.slice(maxEntries);
-  const entries = listed
-    .map((chunk) => `${chunk.id} ${chunk.kind} ~${chunk.tokenEstimate}t`)
-    .join(", ");
-  const omittedTokens = omitted.reduce((sum, chunk) => sum + chunk.tokenEstimate, 0);
-  const omittedText =
-    omitted.length > 0 ? `; omitted ${omitted.length} chunks ~${omittedTokens}t` : "";
-
-  return [
-    {
-      type: "text",
-      text:
-        `[pruned-manifest: ${chunks.length} older chunks ~${totalTokens}t total; ` +
-        `${entries}${omittedText}; restore_chunks by id]`,
-    },
-  ];
-}
-
-function coalescedMemberTombstone(chunk: ContextChunk): ContentBlock[] {
-  return [
-    {
-      type: "text",
-      text: `[pruned:${chunk.id} ${chunk.kind}; in pruned-manifest]`,
-    },
-  ];
-}
-
-function cardText(chunk: ContextChunk, config: PruneChunksConfig): string {
-  if (!config.tombstones.includeSummary) return "";
-  if (chunk.decisionCard) {
-    return ` card="${escapeField(
-      compactDecisionCard(chunk.decisionCard, config.tombstones.maxSummaryChars),
-    )}"`;
-  }
-  if (chunk.summary) {
-    return ` summary="${escapeField(truncateText(chunk.summary, config.tombstones.maxSummaryChars))}"`;
-  }
-  return "";
-}
-
-function sourceText(chunk: ContextChunk): string {
-  const source = chunk.source;
-  if (!source?.path) return "";
-  if (source.startLine != null && source.endLine != null) {
-    return ` source="${escapeField(`${source.path}:${source.startLine}-${source.endLine}`)}"`;
-  }
-  if (source.startLine != null) {
-    return ` source="${escapeField(`${source.path}:${source.startLine}`)}"`;
-  }
-  return ` source="${escapeField(source.path)}"`;
-}
-
-function escapeField(text: string): string {
-  return text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\s+/g, " ").trim();
+function textBlock(text: string): ContentBlock[] {
+  return [{ type: "text", text }];
 }

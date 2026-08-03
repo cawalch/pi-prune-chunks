@@ -14,22 +14,6 @@ export type ChunkRisk = "low" | "medium" | "high";
 
 export type RestoreMode = "memory" | "disk_cache" | "source_rehydrate" | "unavailable";
 
-export type AutoPrunePolicyMode = "heuristic-v1" | "adaptive-v1";
-
-export type DecisionCardMode = "heuristic" | "model-assisted";
-
-export type ModelProfile = "auto" | "local-32k" | "local-64k" | "cloud-200k" | "cloud-1m";
-
-export type PolicyProfileName =
-  | "local-32k"
-  | "local-64k"
-  | "cloud-200k"
-  | "cloud-1m"
-  | "privacy-max"
-  | "research-heavy"
-  | "coding-heavy"
-  | "debug-failures";
-
 export interface DiskCacheConfig {
   enabled: boolean;
   directory?: string;
@@ -41,6 +25,9 @@ export interface DiskCacheConfig {
 export type ContentBlock = {
   type: string;
   text?: string;
+  id?: string;
+  name?: string;
+  arguments?: Record<string, unknown>;
   [key: string]: unknown;
 };
 
@@ -53,16 +40,6 @@ export interface ChunkSource {
   toolCallId?: string;
   contentHash?: string;
   mtimeMs?: number;
-}
-
-export interface ChunkDecisionCard {
-  gist: string;
-  evidence: string[];
-  restoreWhen: string[];
-  safeToIgnoreWhen?: string[];
-  sourceAnchors?: string[];
-  hazards?: string[];
-  generatedBy: "heuristic" | "model";
 }
 
 export type ChunkScopeKind = "main" | "subagent" | "chain";
@@ -102,7 +79,6 @@ export interface ContextChunk {
   pruneReason?: string;
   pinReason?: string;
   summary?: string;
-  decisionCard?: ChunkDecisionCard;
   source?: ChunkSource;
   restoreMode: RestoreMode;
   restoreAvailable: boolean;
@@ -115,66 +91,6 @@ export type PreserveContext = {
   anchors?: Set<string>;
 };
 
-export type TelemetryEventType =
-  | "collect"
-  | "manual_prune"
-  | "auto_prune"
-  | "restore"
-  | "pin"
-  | "unpin"
-  | "tombstone"
-  | "coalesce";
-
-export interface ContinuationManifestEntry {
-  id: string;
-  label: string;
-  kind: ChunkKind;
-  risk: ChunkRisk;
-  tokenEstimate: number;
-  status: "active" | "pruned";
-  card?: string;
-  restoreHint?: string;
-  sourceAnchors?: string[];
-}
-
-export interface TaskStateSummary {
-  headline: string;
-  activePaths: string[];
-  openFailures: string[];
-  changedFiles: string[];
-  reasoningAnchors: string[];
-  protectedChunks: string[];
-  restoreHints: string[];
-}
-
-export interface ContinuationManifest {
-  id: string;
-  generatedAt: number;
-  reason: string;
-  pressurePercent: number | null;
-  policy: AutoPrunePolicyMode;
-  modelProfile: ModelProfile;
-  modifiedPaths: string[];
-  pinnedChunkIds: string[];
-  taskState?: TaskStateSummary;
-  active: ContinuationManifestEntry[];
-  prunedHighValue: ContinuationManifestEntry[];
-  unresolvedFailures: ContinuationManifestEntry[];
-  recentRestores: ContinuationManifestEntry[];
-}
-
-export interface ContextTelemetryEvent {
-  id: string;
-  type: TelemetryEventType;
-  timestamp: number;
-  chunkId?: string;
-  count?: number;
-  tokens?: number;
-  restoreMode?: RestoreMode;
-  status?: string;
-  reason?: string;
-}
-
 export interface ChunkAuditEvent {
   id: string;
   chunkId: string;
@@ -186,6 +102,7 @@ export interface ChunkAuditEvent {
 export interface ChunkContentCache {
   get(id: string, mode?: "memory" | "disk_cache"): ContentBlock[] | undefined;
   set(id: string, content: ContentBlock[]): void;
+  archive(id: string, content: ContentBlock[]): Promise<void>;
   delete(id: string): void;
   has(id: string, mode?: "memory" | "disk_cache"): boolean;
   clear(): void;
@@ -198,41 +115,27 @@ export interface ContextUsage {
 }
 
 export type PruneChunksConfig = {
-  profile: PolicyProfileName;
   enabled: boolean;
   trackTools: string[];
   track: {
     minChunkTokens: number;
-  };
-  autoPrune: {
-    enabled: boolean;
-    policy: AutoPrunePolicyMode;
-    modelProfile: ModelProfile;
-    startAtPercent: number;
-    targetPercent: number;
-    preserveRecentChunks: number;
-    preserveRecentMinutes: number;
-    minChunkTokens: number;
-    maxChunksPerPass: number;
-    pruneSupersededOnIngest: boolean;
-    pruneZeroMatchSearchesOnIngest: boolean;
-  };
-  reamerx: {
-    pruneExploratoryAfterTerminal: boolean;
-  };
-  decisionCards: {
-    mode: DecisionCardMode;
-    maxModelInputTokens: number;
-    maxModelOutputChars: number;
-  };
-  tombstones: {
-    includeSummary: boolean;
-    includeRestoreHint: boolean;
     maxSummaryChars: number;
-    compactAtPercent: number;
-    coalesceAtPercent: number;
-    coalesceMinChunks: number;
-    maxCoalescedEntries: number;
+  };
+  budget: {
+    windowFraction: number;
+    minTokens: number;
+    maxTokens: number;
+    preserveRecentResults: number;
+    preserveRecentMinutes: number;
+  };
+  emergency: {
+    minResponseHeadroomTokens: number;
+    retryAfterGrowthTokens: number;
+  };
+  redundancy: {
+    enabled: boolean;
+    pruneZeroMatchSearches: boolean;
+    pruneReamerxExplorationAfterTerminal: boolean;
   };
   contextGuards: {
     compactFailedToolValidation: boolean;
@@ -256,7 +159,6 @@ export interface CollectedChunk {
   risk: ChunkRisk;
   tokenEstimate: number;
   summary?: string;
-  decisionCard?: ChunkDecisionCard;
   source?: ChunkSource;
   scope?: ChunkScope;
 }
@@ -297,7 +199,6 @@ export type ChunkListOutput = {
     restoreAvailable: boolean;
     restoreUnavailableReason?: string;
     summary?: string;
-    decisionCard?: ChunkDecisionCard;
     source?: ChunkSource;
     createdAt: number;
     lastRestoredAt?: number;
@@ -326,11 +227,14 @@ export type ChunkActionResult = {
   restoreMode?: RestoreMode;
 };
 
-export type PersistedPruneChunksState = {
-  version: 1;
-  chunks: ContextChunk[];
-  audit: ChunkAuditEvent[];
-  telemetry?: ContextTelemetryEvent[];
-  continuationManifest?: ContinuationManifest;
-  activeProfile?: PolicyProfileName;
+export type StateDeltaAction = {
+  id: string;
+  state: "pruned" | "active";
+  reason?: string;
+  timestamp: number;
+};
+
+export type PersistedStateDelta = {
+  version: 2;
+  actions: StateDeltaAction[];
 };
