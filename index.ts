@@ -1,27 +1,23 @@
 /**
- * Prune Chunks - restorable context garbage collection for bulky tool results.
+ * Prune Chunks v0.2 - invisible hygiene for bulky tool output.
  */
 
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { extractReasoningAnchors } from "./src/anchors";
 import { collectToolResult } from "./src/collector";
-import { isPolicyProfile, mergeConfig, POLICY_PROFILE_NAMES } from "./src/config";
+import { mergeConfig, type RawPruneChunksConfig } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
 import { CompositeChunkContentCache, DiskChunkContentCache } from "./src/diskCache";
 import {
-  isCompactionImminent,
-  prepareContinuationManifest,
-  renderContinuationManifestPreview,
-} from "./src/manifest";
-import {
-  autoPrune,
-  contextPercent,
-  pruneReamerxExploratoryAfterTerminal,
-  pruneSupersededAfterCollect,
-  suggestPruneCandidates,
+  budgetRetirementPlan,
+  type EmergencySweepState,
+  emergencyRetirementPlan,
+  manualRetirementPlan,
+  type RetirementPlan,
+  redundantRetirements,
+  shouldRunEmergencySweep,
 } from "./src/pruner";
 import { ChunkRegistry, MemoryChunkContentCache } from "./src/registry";
 import {
@@ -29,354 +25,185 @@ import {
   renderActionResults,
   renderCandidates,
   renderChunkList,
-  renderPressure,
+  renderStatus,
 } from "./src/render";
 import { restoreChunks } from "./src/restorer";
-import {
-  renderTelemetryReport,
-  TelemetryRecorder,
-  telemetryTombstoneTokens,
-} from "./src/telemetry";
-import { applyPrunedTombstones } from "./src/tombstones";
+import { renderTelemetryReport, TelemetryRecorder } from "./src/telemetry";
+import { rewriteRetiredExchanges } from "./src/tombstones";
 import type {
-  ChunkKind,
   ChunkScope,
   ChunkScopeKind,
   ContentBlock,
   ContextUsage,
-  ContinuationManifest,
-  PersistedPruneChunksState,
-  PolicyProfileName,
+  PersistedStateDelta,
   PreserveContext,
   PruneChunksConfig,
+  StateDeltaAction,
 } from "./src/types";
 
-const STATE_TYPE = "prune-chunks-state-v1";
+const STATE_TYPE = "prune-chunks-state-v2";
 
 export default function (pi: ExtensionAPI) {
-  const config = resolveConfig(pi);
+  let config: PruneChunksConfig;
+  try {
+    config = resolveConfig(pi);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pi.log?.("error", message);
+    throw error;
+  }
+
   const registry = new ChunkRegistry(createContentCache(config));
   const telemetry = new TelemetryRecorder();
-  let continuationManifest: ContinuationManifest | undefined;
+  const pendingArchives = new Set<Promise<void>>();
+  let emergencyState: EmergencySweepState | undefined;
+  let reconcileAfterCompaction = false;
 
-  function persistState() {
-    const state = registry.persistenceState();
-    state.telemetry = telemetry.persistenceState();
-    state.continuationManifest = continuationManifest;
-    state.activeProfile = config.profile;
-    pi.appendEntry(STATE_TYPE, { state });
+  function persistActions(actions: StateDeltaAction[]): void {
+    if (actions.length === 0) return;
+    const delta: PersistedStateDelta = { version: 2, actions };
+    pi.appendEntry(STATE_TYPE, delta);
+  }
+
+  function scheduleArchive(ids: string[]): void {
+    if (ids.length === 0) return;
+    const startedAt = performance.now();
+    const pending = registry
+      .archive(ids)
+      .then(() => telemetry.recordArchiveDuration(performance.now() - startedAt))
+      .catch((error) => {
+        if (config.debug) {
+          pi.log?.(
+            "warn",
+            `prune-chunks: archive failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      })
+      .finally(() => pendingArchives.delete(pending));
+    pendingArchives.add(pending);
+  }
+
+  function retirePlan(
+    plan: RetirementPlan,
+    automatic: boolean,
+    reason: string = plan.cause,
+  ): ReturnType<ChunkRegistry["prune"]> {
+    const ids = plan.candidates.map((candidate) => candidate.id);
+    const results = registry.prune(ids, reason, automatic ? "auto_pruned" : "pruned");
+    const retiredIds = results
+      .filter((result) => result.status === "pruned")
+      .map((result) => result.id);
+    scheduleArchive(retiredIds);
+    telemetry.recordRetirements(results, automatic, reason);
+    persistActions(
+      retiredIds.map((id) => ({
+        id,
+        state: "pruned",
+        reason,
+        timestamp: Date.now(),
+      })),
+    );
+    return results;
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    const state = latestPersistedState(ctx?.sessionManager?.getEntries?.() ?? []);
-    if (state) {
-      applyProfile(config, state.activeProfile);
-      registry.restorePersistence(state);
-      telemetry.restorePersistence(state.telemetry);
-      continuationManifest = state.continuationManifest;
-    }
+    const compactedIds = rebuildRegistry(
+      registry,
+      ctx?.sessionManager?.getEntries?.() ?? [],
+      config,
+    );
+    scheduleArchive(compactedIds);
+    emergencyState = undefined;
+    reconcileAfterCompaction = false;
   });
 
   pi.on("session_shutdown", async () => {
+    await Promise.allSettled([...pendingArchives]);
     registry.reset();
-    telemetry.restorePersistence([]);
-    continuationManifest = undefined;
+    telemetry.reset();
+    emergencyState = undefined;
+    reconcileAfterCompaction = false;
   });
 
   pi.on("session_compact", async () => {
-    // Compaction replaces the transcript with a summary, so the continuation
-    // manifest we prepared against the pre-compaction state no longer
-    // describes the surviving context. Drop it so context_pressure does not
-    // report a stale manifest. Tracked chunks stay restorable from cache.
-    // (Active chunks summarized away are reconciled by the context handler's
-    // transcript eviction on the next turn.)
-    if (continuationManifest) {
-      continuationManifest = undefined;
-      persistState();
-    }
+    telemetry.recordCompaction();
+    emergencyState = undefined;
+    reconcileAfterCompaction = true;
   });
 
-  pi.on("tool_result", async (event, ctx) => {
+  pi.on("tool_result", async (event) => {
     const collected = collectToolResult({
       toolCallId: String(event.toolCallId),
       toolName: String(event.toolName),
       content: normalizeContent(event.content),
       params: extractParams(event),
       scope: extractScope(event),
-      modelCardResponse: extractModelCardResponse(event),
       config,
     });
-    if (collected) {
-      const chunk = registry.addCollected(collected);
-      telemetry.recordCollected(chunk);
-      const pressurePercent = contextPercent(getUsage(ctx));
-      const stalePrune = pruneSupersededAfterCollect(registry, chunk, config, pressurePercent);
-      telemetry.recordActionResults("auto_prune", stalePrune.pruned, "superseded on ingest");
-      const reamerxPrune = pruneReamerxExploratoryAfterTerminal(registry, chunk, config);
-      telemetry.recordActionResults(
-        "auto_prune",
-        reamerxPrune.pruned,
-        "ReamerX exploratory superseded",
-      );
-      if (
-        stalePrune.pruned.some((result) => result.status === "pruned") ||
-        reamerxPrune.pruned.some((result) => result.status === "pruned")
-      ) {
-        persistState();
-      }
+    if (!collected) return;
+
+    const chunk = registry.addCollected(collected);
+    telemetry.recordCollected(chunk);
+    const redundant = redundantRetirements(registry, chunk, config);
+    for (const grouped of groupPlanByReason(redundant)) {
+      retirePlan(grouped, true, grouped.candidates[0]?.reason ?? "redundant output");
     }
   });
 
   pi.on("context", async (event, ctx) => {
+    if (!config.enabled) return;
+    const startedAt = performance.now();
+    const originalMessages = event.messages ?? [];
     const usage = getUsage(ctx);
-    const preserve = preserveContext(event.messages ?? [], ctx);
-    const continuationPrep = prepareContinuationManifest(registry, usage, config, preserve);
-    if (continuationPrep.manifest) continuationManifest = continuationPrep.manifest;
-    if (continuationPrep.manifest || continuationPrep.pinnedIds.length > 0) persistState();
-    const pruneResult = autoPrune(registry, usage, config, { preserve });
-    telemetry.recordActionResults("auto_prune", pruneResult.pruned, pruneResult.reason);
-    if (pruneResult.pruned.some((result) => result.status === "pruned")) {
-      persistState();
-      if (ctx?.hasUI) {
-        ctx.ui.notify(
-          `Auto-pruned ${pruneResult.pruned.length} chunks, ~${pruneResult.savedTokens} tokens saved.`,
-          "info",
-        );
-      }
+    const preserve = preserveContext(originalMessages, ctx);
+    const presentToolCallIds = toolResultIds(originalMessages);
+
+    const absentIds = registry.absentFromContext(presentToolCallIds, reconcileAfterCompaction);
+    reconcileAfterCompaction = false;
+    if (absentIds.length > 0) {
+      retirePlan(planForIds(registry, absentIds, "compacted out of live context"), true);
     }
 
-    const presentToolCallIds = new Set<string>();
-    for (const message of event.messages ?? []) {
-      if (message.role === "toolResult" && message.toolCallId) {
-        const toolCallId = String(message.toolCallId);
-        presentToolCallIds.add(toolCallId);
-        registry.markSeenByToolCallId(toolCallId);
-      }
+    const budget = budgetRetirementPlan(registry, usage, config, { preserve });
+    retirePlan(budget, true, "tool-output budget exceeded");
+
+    if (shouldRunEmergencySweep(usage, config, registry.revision(), emergencyState)) {
+      const emergency = emergencyRetirementPlan(registry, usage, config, { preserve });
+      retirePlan(emergency, true, "emergency response headroom");
+      emergencyState = {
+        registryRevision: registry.revision(),
+        usageTokens: usage?.tokens ?? 0,
+      };
     }
-    // Reconcile against the live transcript: evict active main-scope chunks
-    // that were seen but are no longer present (e.g. summarized away by
-    // compaction). evictAbsentFromContext requires at least one main-scope
-    // seen chunk still present, so a subagent's context event (which has none)
-    // never evicts main chunks.
-    const evicted = registry.evictAbsentFromContext(presentToolCallIds);
-    if (evicted.some((result) => result.status === "pruned")) {
-      persistState();
-    }
+
+    // A result becomes ordinary budget-eligible only after one provider pass.
+    for (const toolCallId of presentToolCallIds) registry.markSeenByToolCallId(toolCallId);
+
+    const rewritten = rewriteRetiredExchanges(originalMessages, registry);
+    const guarded = compactFailedToolValidationMessages(rewritten.messages, config);
+    const modified = rewritten.modified || guarded.modified;
+    const effectiveTokensSaved = modified
+      ? Math.max(
+          0,
+          estimateProviderTokens(originalMessages) - estimateProviderTokens(guarded.messages),
+        )
+      : 0;
+    telemetry.recordContextPass({
+      durationMs: performance.now() - startedAt,
+      modified,
+      removedExchanges: rewritten.removedExchanges,
+      fallbackMarkers: rewritten.fallbackMarkers,
+      partialMarkers: rewritten.partialMarkers,
+      effectiveTokensSaved,
+    });
 
     if (ctx?.hasUI) {
-      ctx.ui.setStatus("prune-chunks", contextFooter(registry, usage));
+      ctx.ui.setStatus("prune-chunks", contextFooter(registry, usage, config));
     }
-
-    const tombstones = applyPrunedTombstones(
-      event.messages ?? [],
-      (toolCallId) => registry.prunedForToolCall(toolCallId),
-      config,
-      {
-        compact: shouldCompactTombstones(usage, config),
-        coalesce: shouldCoalesceTombstones(usage, config),
-      },
-      (toolCallId) => registry.prunedPartsForToolCall(toolCallId),
-    );
-    const guarded = compactFailedToolValidationMessages(tombstones.messages, config);
-
-    if (tombstones.modified || guarded.modified) {
-      telemetry.recordTombstones({
-        tombstoneTokens: telemetryTombstoneTokens(guarded.messages),
-        coalesced: tombstones.coalesced,
-        coalescedCount: tombstones.coalescedCount,
-      });
-      return { messages: guarded.messages };
-    }
+    if (modified) return { messages: guarded.messages };
   });
 
-  pi.registerTool({
-    name: "list_context_chunks",
-    label: "List context chunks",
-    description:
-      "List tracked restorable tool-result chunks with token estimates, kind, risk, pin/prune state, source, and restore availability.",
-    promptSnippet: "List tracked context chunks and their prune/restore metadata",
-    promptGuidelines: [
-      "Use list_context_chunks before manual pruning or restoring.",
-      "Prefer pruning old, low-risk, restorable chunks that are no longer task-critical.",
-    ],
-    parameters: Type.Object({
-      toolName: Type.Optional(Type.String({ description: "Filter by exact tool name" })),
-      kind: Type.Optional(Type.String({ description: "Filter by chunk kind" })),
-      pruned: Type.Optional(Type.Boolean({ description: "Filter by pruned state" })),
-      pinned: Type.Optional(Type.Boolean({ description: "Filter by pinned state" })),
-      minTokens: Type.Optional(
-        Type.Number({ description: "Only show chunks at or above this token estimate" }),
-      ),
-      scope: Type.Optional(
-        Type.String({ description: "Filter by scope: main, subagent, or chain" }),
-      ),
-      limit: Type.Optional(Type.Number({ description: "Maximum rows to return, default 20" })),
-      sortBy: Type.Optional(Type.String({ description: "tokens, age, recent, or risk" })),
-    }),
-    async execute(_toolCallId, params) {
-      const output = registry.list({
-        toolName: stringOrUndefined(params.toolName),
-        kind: kindOrUndefined(params.kind),
-        pruned: booleanOrUndefined(params.pruned),
-        pinned: booleanOrUndefined(params.pinned),
-        minTokens: numberOrUndefined(params.minTokens),
-        scope: scopeOrUndefined(params.scope),
-        limit: numberOrUndefined(params.limit),
-        sortBy: sortOrUndefined(params.sortBy),
-      });
-      return {
-        content: [{ type: "text", text: renderChunkList(output) }],
-        details: output,
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "prune_chunks",
-    label: "Prune context chunks",
-    description:
-      "Mark selected chunks as pruned. Pruned tool results are replaced with tombstones in provider context only.",
-    promptSnippet: "Prune selected context chunks by id",
-    promptGuidelines: [
-      "Pass explicit chunk ids from list_context_chunks.",
-      "Do not prune recent failures, current diff summaries, or user/PR constraints.",
-    ],
-    parameters: Type.Object({
-      ids: Type.Array(Type.String({ description: "Chunk ids to prune" })),
-      reason: Type.Optional(Type.String({ description: "Reason for audit trail" })),
-    }),
-    async execute(_toolCallId, params) {
-      const ids = arrayOfStrings(params.ids);
-      const reason = stringOrUndefined(params.reason);
-      const results = registry.prune(ids, reason);
-      telemetry.recordActionResults("manual_prune", results, reason);
-      persistState();
-      return {
-        content: [{ type: "text", text: renderActionResults("pruned", ids, results) }],
-        details: { results },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "restore_chunks",
-    label: "Restore context chunks",
-    description:
-      "Restore selected pruned chunks using same-session memory first, then source rehydration when available.",
-    promptSnippet: "Restore pruned context chunks by id",
-    promptGuidelines: ["Use restore_chunks when a tombstoned result is needed again."],
-    parameters: Type.Object({
-      ids: Type.Array(Type.String({ description: "Chunk ids to restore" })),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const ids = arrayOfStrings(params.ids);
-      const results = await restoreChunks(registry, ids, config, {
-        cwd: currentWorkingDirectory(ctx),
-      });
-      telemetry.recordRestoreResults(results);
-      persistState();
-      return {
-        content: [{ type: "text", text: renderActionResults("restored", ids, results) }],
-        details: { results },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "pin_chunks",
-    label: "Pin context chunks",
-    description: "Pin chunks so the auto-prune policy will not prune them.",
-    promptSnippet: "Pin selected context chunks",
-    promptGuidelines: [
-      "Pin current failures, active plans, and chunks that are still task-critical.",
-    ],
-    parameters: Type.Object({
-      ids: Type.Array(Type.String({ description: "Chunk ids to pin" })),
-      reason: Type.Optional(Type.String({ description: "Reason for audit trail" })),
-    }),
-    async execute(_toolCallId, params) {
-      const ids = arrayOfStrings(params.ids);
-      const reason = stringOrUndefined(params.reason);
-      const results = registry.pin(ids, reason);
-      telemetry.recordActionResults("pin", results, reason);
-      persistState();
-      return {
-        content: [{ type: "text", text: renderActionResults("pinned", ids, results) }],
-        details: { results },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "unpin_chunks",
-    label: "Unpin context chunks",
-    description: "Unpin chunks so they can be considered by the auto-prune policy again.",
-    promptSnippet: "Unpin selected context chunks",
-    parameters: Type.Object({
-      ids: Type.Array(Type.String({ description: "Chunk ids to unpin" })),
-    }),
-    async execute(_toolCallId, params) {
-      const ids = arrayOfStrings(params.ids);
-      const results = registry.unpin(ids);
-      telemetry.recordActionResults("unpin", results);
-      persistState();
-      return {
-        content: [{ type: "text", text: renderActionResults("unpinned", ids, results) }],
-        details: { results },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "context_report",
-    label: "Context telemetry report",
-    description:
-      "Return a Markdown telemetry report for tracked/pruned/restored chunks without raw tool output.",
-    promptSnippet: "Generate a context pruning telemetry report",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const usage = getUsage(ctx);
-      const snapshot = telemetry.snapshot(registry.summary(), config, usage);
-      const report = renderTelemetryReport(snapshot);
-      return {
-        content: [{ type: "text", text: report }],
-        details: snapshot,
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "context_pressure",
-    label: "Context pressure",
-    description: "Return context chunk pressure, largest active chunks, and safe prune candidates.",
-    promptSnippet: "Inspect context pressure and recommended prune candidates",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const usage = getUsage(ctx);
-      const preserve = preserveContext([], ctx);
-      const prep = prepareContinuationManifest(registry, usage, config, preserve);
-      if (prep.manifest) continuationManifest = prep.manifest;
-      if (prep.manifest || prep.pinnedIds.length > 0) persistState();
-      const pressure = renderPressure(registry, usage, config, preserve, continuationManifest);
-      const delta = telemetry.pressureDelta(registry.summary());
-      return {
-        content: [{ type: "text", text: `${pressure}\n\n${delta}` }],
-        details: { pressure, delta, continuationManifest },
-      };
-    },
-  });
-
-  registerCommands(
-    pi,
-    registry,
-    config,
-    telemetry,
-    () => continuationManifest,
-    (manifest) => {
-      continuationManifest = manifest;
-    },
-    persistState,
-  );
+  registerCommands(pi, registry, config, telemetry, retirePlan, persistActions);
 }
 
 function registerCommands(
@@ -384,137 +211,79 @@ function registerCommands(
   registry: ChunkRegistry,
   config: PruneChunksConfig,
   telemetry: TelemetryRecorder,
-  getContinuationManifest: () => ContinuationManifest | undefined,
-  setContinuationManifest: (manifest: ContinuationManifest | undefined) => void,
-  persistState: () => void,
+  retirePlan: (
+    plan: RetirementPlan,
+    automatic: boolean,
+    reason?: string,
+  ) => ReturnType<ChunkRegistry["prune"]>,
+  persistActions: (actions: StateDeltaAction[]) => void,
 ): void {
   pi.registerCommand("prune-status", {
-    description: "Show context chunk tracking and pruning status",
+    description: "Show the bounded tool-output working set",
     async handler(_args, ctx) {
-      const usage = getUsage(ctx);
-      const preserve = preserveContext([], ctx);
-      const prep = prepareContinuationManifest(registry, usage, config, preserve);
-      if (prep.manifest) setContinuationManifest(prep.manifest);
-      if (prep.manifest || prep.pinnedIds.length > 0) persistState();
-      const manifest = getContinuationManifest();
-      const pressure = renderPressure(registry, usage, config, preserve, manifest);
-      notify(
-        ctx,
-        isCompactionImminent(usage, config) || manifest
-          ? pressure
-          : `${pressure}\n\n${renderContinuationManifestPreview(undefined)}`,
-      );
-    },
-  });
-
-  pi.registerCommand("prune-profile", {
-    description: "Show or switch the active prune policy profile for this live session",
-    async handler(args, ctx) {
-      const parsed = parseCommandArgs(args);
-      const requested = idsFromCommandArgs(parsed)[0];
-      if (!requested || requested === "show" || requested === "list") {
-        notify(ctx, renderProfileStatus(config));
-        return;
-      }
-      if (requested === "reset") {
-        const settingsConfig = resolveConfig(pi);
-        applyConfig(config, settingsConfig);
-        persistState();
-        notify(ctx, `Prune profile reset to settings/default: ${config.profile}`);
-        return;
-      }
-      if (!isPolicyProfile(requested)) {
-        notify(
-          ctx,
-          `Unknown prune profile "${requested}". Available profiles: ${POLICY_PROFILE_NAMES.join(", ")}`,
-        );
-        return;
-      }
-      applyProfile(config, requested);
-      persistState();
-      notify(ctx, `Prune profile switched to ${config.profile} for this live session.`);
+      notify(ctx, renderStatus(registry, getUsage(ctx), config));
     },
   });
 
   pi.registerCommand("prune-largest", {
-    description: "Show largest unpruned chunks",
+    description: "Inspect the largest tracked tool results",
     async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
-      const kind = kindOrUndefined(stringOption(parsed, "--kind"));
       const scope = scopeOrUndefined(stringOption(parsed, "--scope"));
-      const output = registry.list({ pruned: false, kind, scope, sortBy: "tokens", limit });
-      notify(ctx, renderChunkList(output));
+      notify(
+        ctx,
+        renderChunkList(registry.list({ pruned: false, scope, sortBy: "tokens", limit })),
+      );
     },
   });
 
   pi.registerCommand("prune-suggest", {
-    description: "Show safe auto-prune candidates without pruning",
+    description: "Inspect safe manual cleanup candidates",
     async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
+      const plan = manualRetirementPlan(registry, config, {
+        limit,
+        preserve: preserveContext([], ctx),
+      });
+      notify(ctx, renderCandidates(plan.candidates));
+    },
+  });
+
+  pi.registerCommand("prune-now", {
+    description: "Retire selected chunks or apply safe manual cleanup",
+    async handler(args, ctx) {
+      const parsed = parseCommandArgs(args);
+      const explicitIds = parsed.filter((arg) => arg.startsWith("pc_"));
+      const limit = numberOption(parsed, "--limit") ?? 10;
+      const plan =
+        explicitIds.length > 0
+          ? planForIds(registry, explicitIds, "manual selection")
+          : manualRetirementPlan(registry, config, {
+              limit,
+              preserve: preserveContext([], ctx),
+            });
+      if (parsed.includes("--dry-run")) {
+        notify(ctx, renderCandidates(plan.candidates));
+        return;
+      }
+      const results = retirePlan(plan, false, "manual /prune-now");
       notify(
         ctx,
-        renderCandidates(
-          suggestPruneCandidates(registry, config, {
-            limit,
-            preserve: preserveContext([], ctx),
-          }),
+        renderActionResults(
+          "pruned",
+          plan.candidates.map((item) => item.id),
+          results,
         ),
       );
     },
   });
 
-  pi.registerCommand("prune-report", {
-    description: "Write a Markdown telemetry report for pruning activity",
-    async handler(args, ctx) {
-      const parsed = parseCommandArgs(args);
-      const output = stringOption(parsed, "--output") ?? "prune-report.md";
-      const report = renderTelemetryReport(
-        telemetry.snapshot(registry.summary(), config, getUsage(ctx)),
-      );
-      const destination = path.resolve(currentWorkingDirectory(ctx) ?? process.cwd(), output);
-      await writeFile(destination, report, "utf8");
-      notify(ctx, `Wrote prune telemetry report to ${output}`);
-    },
-  });
-
-  pi.registerCommand("prune-now", {
-    description: "Apply safe auto-pruning immediately",
-    async handler(args, ctx) {
-      const parsed = parseCommandArgs(args);
-      const dryRun = parsed.includes("--dry-run");
-      const target = numberOption(parsed, "--target");
-      const candidates = suggestPruneCandidates(registry, config, {
-        limit: config.autoPrune.maxChunksPerPass,
-        preserve: preserveContext([], ctx),
-      });
-      const ids = pickCandidateIds(
-        candidates,
-        target,
-        getUsage(ctx),
-        registry.summary().activeTokens,
-      );
-      if (dryRun) {
-        notify(
-          ctx,
-          ids.length === 0
-            ? "No safe prune candidates found."
-            : renderCandidates(candidates.filter((c) => ids.includes(c.id))),
-        );
-        return;
-      }
-      const results = registry.prune(ids, "manual /prune-now", "auto_pruned");
-      telemetry.recordActionResults("auto_prune", results, "manual /prune-now");
-      persistState();
-      notify(ctx, renderActionResults("pruned", ids, results));
-    },
-  });
-
   pi.registerCommand("prune-restore", {
-    description: "Restore pruned chunks by ID",
+    description: "Restore retired tool output by chunk ID",
     async handler(args, ctx) {
-      const ids = idsFromCommandArgs(parseCommandArgs(args));
+      const ids = parseCommandArgs(args).filter((arg) => arg.startsWith("pc_"));
       if (ids.length === 0) {
         notify(ctx, "Usage: /prune-restore <id> [id...]");
         return;
@@ -523,8 +292,31 @@ function registerCommands(
         cwd: currentWorkingDirectory(ctx),
       });
       telemetry.recordRestoreResults(results);
-      persistState();
+      persistActions(
+        results
+          .filter((result) => result.status === "restored")
+          .map((result) => ({
+            id: result.id,
+            state: "active",
+            timestamp: Date.now(),
+          })),
+      );
       notify(ctx, renderActionResults("restored", ids, results));
+    },
+  });
+
+  pi.registerCommand("prune-report", {
+    description: "Write a tool-output hygiene report",
+    async handler(args, ctx) {
+      const parsed = parseCommandArgs(args);
+      const output = stringOption(parsed, "--output") ?? "prune-report.md";
+      const destination = path.resolve(currentWorkingDirectory(ctx) ?? process.cwd(), output);
+      await writeFile(
+        destination,
+        renderTelemetryReport(telemetry.snapshot(registry.summary(), getUsage(ctx))),
+        "utf8",
+      );
+      notify(ctx, `Wrote tool-output hygiene report to ${output}`);
     },
   });
 }
@@ -540,60 +332,151 @@ function createContentCache(config: PruneChunksConfig) {
 
 function resolveConfig(pi: ExtensionAPI): PruneChunksConfig {
   const raw =
-    (pi as unknown as { config?: { pruneChunks?: Partial<PruneChunksConfig> } }).config
-      ?.pruneChunks ??
-    (pi as unknown as { settings?: { pruneChunks?: Partial<PruneChunksConfig> } }).settings
-      ?.pruneChunks;
+    (pi as unknown as { config?: { pruneChunks?: RawPruneChunksConfig } }).config?.pruneChunks ??
+    (pi as unknown as { settings?: { pruneChunks?: RawPruneChunksConfig } }).settings?.pruneChunks;
   return mergeConfig(raw);
 }
 
-function applyProfile(config: PruneChunksConfig, profile: PolicyProfileName | undefined): void {
-  if (!profile) return;
-  applyConfig(config, mergeConfig({ ...config, profile }));
-}
+function rebuildRegistry(
+  registry: ChunkRegistry,
+  entries: unknown[],
+  config: PruneChunksConfig,
+): string[] {
+  registry.reset();
+  const paramsByToolCall = new Map<string, Record<string, unknown>>();
+  const entryIndexById = new Map<string, number>();
+  const resultIndexByToolCall = new Map<string, number>();
+  const compactedIds = new Set<string>();
 
-function applyConfig(target: PruneChunksConfig, next: PruneChunksConfig): void {
-  Object.assign(target, next);
-}
-
-function renderProfileStatus(config: PruneChunksConfig): string {
-  return [
-    `Active prune profile: ${config.profile}`,
-    `Policy: ${config.autoPrune.policy}; model profile: ${config.autoPrune.modelProfile}`,
-    `Auto-prune: start=${config.autoPrune.startAtPercent}% target=${config.autoPrune.targetPercent}% maxChunks=${config.autoPrune.maxChunksPerPass}`,
-    `Tombstones: summary=${config.tombstones.includeSummary ? "on" : "off"} maxSummary=${config.tombstones.maxSummaryChars} compact=${config.tombstones.compactAtPercent}% coalesce=${config.tombstones.coalesceAtPercent}%/${config.tombstones.coalesceMinChunks} chunks`,
-    `Available profiles: ${POLICY_PROFILE_NAMES.join(", ")}`,
-    `Switch with: /prune-profile <profile>; reset with: /prune-profile reset`,
-  ].join("\n");
-}
-
-function latestPersistedState(entries: unknown[]): PersistedPruneChunksState | undefined {
-  let latest: PersistedPruneChunksState | undefined;
-  for (const entry of entries) {
-    const candidate = entry as {
+  for (const [entryIndex, entry] of entries.entries()) {
+    const parsed = entry as {
       type?: string;
+      id?: string;
       customType?: string;
-      data?: { state?: PersistedPruneChunksState } | PersistedPruneChunksState;
+      data?: unknown;
+      timestamp?: string;
+      firstKeptEntryId?: string;
+      message?: {
+        role?: string;
+        toolCallId?: string;
+        toolName?: string;
+        content?: ContentBlock[];
+      };
     };
-    if (candidate.type !== "custom" || candidate.customType !== STATE_TYPE || !candidate.data)
+    if (parsed.id) entryIndexById.set(parsed.id, entryIndex);
+    if (parsed.type === "message" && parsed.message?.role === "assistant") {
+      for (const block of normalizeContent(parsed.message.content)) {
+        if (block.type === "toolCall" && typeof block.id === "string") {
+          paramsByToolCall.set(
+            block.id,
+            block.arguments && typeof block.arguments === "object" ? block.arguments : {},
+          );
+        }
+      }
       continue;
-    if ("state" in candidate.data) {
-      latest = candidate.data.state;
-    } else if (isPersistedState(candidate.data)) {
-      latest = candidate.data;
+    }
+    if (parsed.type === "message" && parsed.message?.role === "toolResult") {
+      const toolCallId = String(parsed.message.toolCallId ?? "");
+      const toolName = String(parsed.message.toolName ?? "unknown");
+      if (!toolCallId) continue;
+      const collected = collectToolResult({
+        toolCallId,
+        toolName,
+        content: normalizeContent(parsed.message.content),
+        params: paramsByToolCall.get(toolCallId),
+        config,
+      });
+      if (!collected) continue;
+      const timestamp = Date.parse(parsed.timestamp ?? "");
+      registry.addCollected(collected, Number.isFinite(timestamp) ? timestamp : Date.now());
+      registry.markSeenByToolCallId(
+        toolCallId,
+        Number.isFinite(timestamp) ? timestamp : Date.now(),
+      );
+      resultIndexByToolCall.set(toolCallId, entryIndex);
     }
   }
-  return latest;
+
+  for (const entry of entries) {
+    const parsed = entry as {
+      type?: string;
+      customType?: string;
+      data?: unknown;
+      firstKeptEntryId?: string;
+    };
+    const delta = persistedDelta(parsed.type, parsed.customType, parsed.data);
+    if (delta) {
+      for (const action of delta.actions) registry.applyDelta(action);
+      continue;
+    }
+    if (parsed.type !== "compaction" || !parsed.firstKeptEntryId) continue;
+    const cutoff = entryIndexById.get(parsed.firstKeptEntryId);
+    if (cutoff == null) continue;
+    const ids = registry
+      .active()
+      .filter(
+        (chunk) =>
+          !chunk.parentId &&
+          !!chunk.source?.toolCallId &&
+          (resultIndexByToolCall.get(chunk.source.toolCallId) ?? Number.POSITIVE_INFINITY) < cutoff,
+      )
+      .map((chunk) => chunk.id);
+    const results = registry.prune(ids, "retired by Pi compaction", "auto_pruned");
+    for (const result of results) {
+      if (result.status === "pruned") compactedIds.add(result.id);
+    }
+  }
+  return [...compactedIds];
 }
 
-function isPersistedState(value: unknown): value is PersistedPruneChunksState {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    (value as PersistedPruneChunksState).version === 1 &&
-    Array.isArray((value as PersistedPruneChunksState).chunks) &&
-    Array.isArray((value as PersistedPruneChunksState).audit)
-  );
+function persistedDelta(
+  type: string | undefined,
+  customType: string | undefined,
+  data: unknown,
+): PersistedStateDelta | undefined {
+  if (type !== "custom" || customType !== STATE_TYPE || !data || typeof data !== "object") {
+    return undefined;
+  }
+  const candidate = data as Partial<PersistedStateDelta>;
+  if (candidate.version !== 2 || !Array.isArray(candidate.actions)) return undefined;
+  return candidate as PersistedStateDelta;
+}
+
+function planForIds(registry: ChunkRegistry, ids: string[], reason: string): RetirementPlan {
+  const candidates = ids
+    .map((id) => registry.get(id))
+    .filter((chunk): chunk is NonNullable<typeof chunk> => !!chunk && !chunk.pruned)
+    .map((chunk) => ({
+      id: chunk.id,
+      label: chunk.label,
+      kind: chunk.kind,
+      risk: chunk.risk,
+      tokenEstimate: chunk.tokenEstimate,
+      reason,
+    }));
+  return {
+    cause: "manual",
+    budgetTokens: null,
+    activeTokens: registry.summary().activeTokens,
+    targetSavings: candidates.reduce((sum, item) => sum + item.tokenEstimate, 0),
+    estimatedSavings: candidates.reduce((sum, item) => sum + item.tokenEstimate, 0),
+    candidates,
+  };
+}
+
+function groupPlanByReason(plan: RetirementPlan): RetirementPlan[] {
+  const groups = new Map<string, RetirementPlan["candidates"]>();
+  for (const candidate of plan.candidates) {
+    const candidates = groups.get(candidate.reason) ?? [];
+    candidates.push(candidate);
+    groups.set(candidate.reason, candidates);
+  }
+  return [...groups.values()].map((candidates) => ({
+    ...plan,
+    targetSavings: candidates.reduce((sum, candidate) => sum + candidate.tokenEstimate, 0),
+    estimatedSavings: candidates.reduce((sum, candidate) => sum + candidate.tokenEstimate, 0),
+    candidates,
+  }));
 }
 
 function normalizeContent(content: unknown): ContentBlock[] {
@@ -607,17 +490,6 @@ function extractParams(event: Record<string, unknown>): Record<string, unknown> 
   return possible && typeof possible === "object" && !Array.isArray(possible)
     ? (possible as Record<string, unknown>)
     : undefined;
-}
-
-function extractModelCardResponse(event: Record<string, unknown>): unknown {
-  const metadata = objectValue(event.metadata) ?? objectValue(event.context) ?? {};
-  const params = extractParams(event) ?? {};
-  return (
-    metadata.modelDecisionCard ??
-    metadata.decisionCard ??
-    params.modelDecisionCard ??
-    params.decisionCard
-  );
 }
 
 function extractScope(event: Record<string, unknown>): ChunkScope | undefined {
@@ -644,6 +516,22 @@ function extractScope(event: Record<string, unknown>): ChunkScope | undefined {
   return { scope, runId, parentRunId, agentName };
 }
 
+function normalizeScope(
+  raw: string | undefined,
+  hints: { runId?: string; parentRunId?: string; agentName?: string },
+): ChunkScopeKind {
+  const normalized = raw?.toLowerCase();
+  if (normalized === "subagent" || normalized === "agent" || normalized === "child") {
+    return "subagent";
+  }
+  if (normalized === "chain" || normalized === "multi-agent" || normalized === "multiagent") {
+    return "chain";
+  }
+  if (normalized === "main" || normalized === "root") return "main";
+  if (hints.parentRunId || hints.agentName) return "subagent";
+  return "main";
+}
+
 function getUsage(ctx: unknown): ContextUsage | null {
   const getter = (ctx as { getContextUsage?: () => ContextUsage | null } | undefined)
     ?.getContextUsage;
@@ -656,7 +544,7 @@ export function preserveContext(
 ): PreserveContext {
   const text = latestUserAndAssistantText(messages);
   return {
-    ids: new Set(text.match(/pc_[0-9a-z]+_[0-9a-f]{6}/g) ?? []),
+    ids: new Set(text.match(/pc_[0-9a-f]{12}(?:#[a-z0-9_-]+)?/g) ?? []),
     paths: new Set([...pathsReferencedInText(text), ...modifiedPaths(ctx)].map(normalizePath)),
     anchors: new Set(extractReasoningAnchors(text)),
   };
@@ -668,26 +556,24 @@ function latestUserAndAssistantText(
   const parts: string[] = [];
   let sawAssistant = false;
   let sawUser = false;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
     if (message.role === "assistant" && !sawAssistant) {
-      parts.push(
-        normalizeContent(message.content)
-          .map((block) => block.text ?? "")
-          .join("\n"),
-      );
+      parts.push(textFromContent(message.content));
       sawAssistant = true;
     } else if (message.role === "user" && !sawUser) {
-      parts.push(
-        normalizeContent(message.content)
-          .map((block) => block.text ?? "")
-          .join("\n"),
-      );
+      parts.push(textFromContent(message.content));
       sawUser = true;
     }
     if (sawAssistant && sawUser) break;
   }
   return parts.join("\n");
+}
+
+function textFromContent(content: unknown): string {
+  return normalizeContent(content)
+    .map((block) => block.text ?? "")
+    .join("\n");
 }
 
 function pathsReferencedInText(text: string): string[] {
@@ -702,50 +588,66 @@ function modifiedPaths(ctx: unknown): string[] {
   const values = [
     (ctx as { modifiedFiles?: unknown } | undefined)?.modifiedFiles,
     (ctx as { modifiedFilePaths?: unknown } | undefined)?.modifiedFilePaths,
-    (ctx as { git?: { modifiedFiles?: unknown; modifiedFilePaths?: unknown } } | undefined)?.git
-      ?.modifiedFiles,
-    (ctx as { git?: { modifiedFiles?: unknown; modifiedFilePaths?: unknown } } | undefined)?.git
-      ?.modifiedFilePaths,
+    (ctx as { git?: { modifiedFiles?: unknown } } | undefined)?.git?.modifiedFiles,
+    (ctx as { git?: { modifiedFilePaths?: unknown } } | undefined)?.git?.modifiedFilePaths,
   ];
-
   const paths: string[] = [];
   for (const value of values) {
     if (!Array.isArray(value)) continue;
     for (const item of value) {
-      if (typeof item === "string") {
-        paths.push(item);
-      } else if (item && typeof item === "object") {
-        const pathValue =
+      if (typeof item === "string") paths.push(item);
+      else if (item && typeof item === "object") {
+        const candidate =
           (item as { path?: unknown }).path ??
           (item as { file?: unknown }).file ??
           (item as { filePath?: unknown }).filePath;
-        if (typeof pathValue === "string") paths.push(pathValue);
+        if (typeof candidate === "string") paths.push(candidate);
       }
     }
   }
   return paths;
 }
 
-function normalizePath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+function toolResultIds(messages: Array<{ role: string; toolCallId?: unknown }>): Set<string> {
+  return new Set(
+    messages
+      .filter((message) => message.role === "toolResult" && message.toolCallId != null)
+      .map((message) => String(message.toolCallId)),
+  );
+}
+
+function estimateProviderTokens(messages: unknown[]): number {
+  let characters = 0;
+  for (const message of messages) {
+    const candidate = message as { role?: string; content?: unknown };
+    if (candidate.role === "user" || candidate.role === "toolResult") {
+      characters += textFromContent(candidate.content).length;
+      continue;
+    }
+    for (const block of normalizeContent(candidate.content)) {
+      if (block.type === "text") characters += block.text?.length ?? 0;
+      else if (block.type === "thinking") characters += String(block.thinking ?? "").length;
+      else characters += String(block.name ?? "").length + safeJsonLength(block.arguments);
+    }
+  }
+  return Math.ceil(characters / 4);
+}
+
+function safeJsonLength(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 16;
+  }
+}
+
+function normalizePath(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 }
 
 function currentWorkingDirectory(ctx: unknown): string | undefined {
   const cwd = (ctx as { cwd?: unknown } | undefined)?.cwd;
   return typeof cwd === "string" ? cwd : undefined;
-}
-
-function shouldCompactTombstones(usage: ContextUsage | null, config: PruneChunksConfig): boolean {
-  if (shouldCoalesceTombstones(usage, config)) return true;
-  const pct = contextPercent(usage);
-  if (pct != null && pct >= config.tombstones.compactAtPercent) return true;
-  return !!usage?.contextWindow && usage.tokens != null && usage.tokens > usage.contextWindow;
-}
-
-function shouldCoalesceTombstones(usage: ContextUsage | null, config: PruneChunksConfig): boolean {
-  const pct = contextPercent(usage);
-  if (pct != null && pct >= config.tombstones.coalesceAtPercent) return true;
-  return !!usage?.contextWindow && usage.tokens != null && usage.tokens > usage.contextWindow;
 }
 
 function notify(ctx: unknown, text: string): void {
@@ -768,14 +670,6 @@ function parseCommandArgs(args: unknown): string[] {
   return [];
 }
 
-function idsFromCommandArgs(args: string[]): string[] {
-  return args
-    .filter((arg) => !arg.startsWith("--"))
-    .flatMap((arg) => arg.split(","))
-    .map((arg) => arg.trim())
-    .filter(Boolean);
-}
-
 function stringOption(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
@@ -788,84 +682,8 @@ function numberOption(args: string[], name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
-function pickCandidateIds(
-  candidates: ReturnType<typeof suggestPruneCandidates>,
-  targetTokens: number | undefined,
-  usage: ContextUsage | null,
-  activeTokens: number,
-): string[] {
-  if (targetTokens == null) return candidates.map((candidate) => candidate.id);
-
-  const currentTokens = usage?.tokens ?? activeTokens;
-  let toFree = Math.max(0, currentTokens - targetTokens);
-  const ids: string[] = [];
-  for (const candidate of candidates) {
-    if (toFree <= 0) break;
-    ids.push(candidate.id);
-    toFree -= candidate.tokenEstimate;
-  }
-  return ids;
-}
-
-function arrayOfStrings(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String) : [];
-}
-
-function stringOrUndefined(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function booleanOrUndefined(value: unknown): boolean | undefined {
-  return typeof value === "boolean" ? value : undefined;
-}
-
-function numberOrUndefined(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function kindOrUndefined(value: unknown): ChunkKind | undefined {
-  const kind = stringOrUndefined(value);
-  if (
-    kind === "file_read" ||
-    kind === "search" ||
-    kind === "flow_trace" ||
-    kind === "context_pack" ||
-    kind === "shell" ||
-    kind === "test_output" ||
-    kind === "diff" ||
-    kind === "outline" ||
-    kind === "symbol" ||
-    kind === "other"
-  ) {
-    return kind;
-  }
-  return undefined;
-}
-
-function sortOrUndefined(value: unknown): "tokens" | "age" | "recent" | "risk" | undefined {
-  const sort = stringOrUndefined(value);
-  if (sort === "tokens" || sort === "age" || sort === "recent" || sort === "risk") return sort;
-  return undefined;
-}
-
 function scopeOrUndefined(value: unknown): ChunkScopeKind | undefined {
-  const scope = stringOrUndefined(value);
-  if (scope === "main" || scope === "subagent" || scope === "chain") return scope;
-  return undefined;
-}
-
-function normalizeScope(
-  raw: string | undefined,
-  hints: { runId?: string; parentRunId?: string; agentName?: string },
-): ChunkScopeKind {
-  const normalized = raw?.toLowerCase();
-  if (normalized === "subagent" || normalized === "child" || normalized === "agent") {
-    return "subagent";
-  }
-  if (normalized === "chain") return "chain";
-  if (normalized === "main" || normalized === "parent") return "main";
-  if (hints.parentRunId || hints.agentName) return "subagent";
-  return "main";
+  return value === "main" || value === "subagent" || value === "chain" ? value : undefined;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {

@@ -1,4 +1,5 @@
-import type { ContextChunk } from "./types";
+import { contentText } from "./text";
+import type { ContentBlock, ContextChunk } from "./types";
 
 const MAX_ANCHORS = 32;
 const MAX_ANCHOR_CHARS = 120;
@@ -31,15 +32,7 @@ export function extractReasoningAnchors(text: string, limit = MAX_ANCHORS): stri
 
 export function chunkReasoningAnchors(chunk: ContextChunk): string[] {
   return extractReasoningAnchors(
-    [
-      chunk.label,
-      chunk.summary,
-      chunk.source?.command,
-      chunk.decisionCard?.gist,
-      ...(chunk.decisionCard?.evidence ?? []),
-      ...(chunk.decisionCard?.sourceAnchors ?? []),
-      ...(chunk.decisionCard?.hazards ?? []),
-    ]
+    [chunk.label, chunk.summary, chunk.source?.command, chunk.source?.path]
       .filter(Boolean)
       .join("\n"),
   );
@@ -48,9 +41,13 @@ export function chunkReasoningAnchors(chunk: ContextChunk): string[] {
 export function matchingReasoningAnchor(
   chunk: ContextChunk,
   preservedAnchors: Set<string> | undefined,
+  content?: ContentBlock[],
 ): string | null {
   if (!preservedAnchors || preservedAnchors.size === 0) return null;
-  const chunkAnchors = new Set(chunkReasoningAnchors(chunk));
+  const chunkAnchors = new Set([
+    ...chunkReasoningAnchors(chunk),
+    ...extractReasoningAnchors(contentText(content ?? [])),
+  ]);
   for (const anchor of preservedAnchors) {
     const normalized = normalizeAnchor(anchor);
     if (normalized && chunkAnchors.has(normalized)) return normalized;

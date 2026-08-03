@@ -1,62 +1,53 @@
 # pi-prune-chunks
 
-**Keep the clue. Park the wall of text. Restore it when you need it.**
+`pi-prune-chunks` keeps a bounded working set of bulky tool output in the
+provider context. It is invisible to the model: there are no pruning tools,
+restore instructions, decision cards, or context-management turns.
 
-`pi-prune-chunks` is a Pi extension that keeps long coding sessions usable by
-replacing old, bulky tool output in provider context with small restorable
-markers. The saved Pi transcript is not rewritten.
+Pi still owns conversation compaction. The extension never calls
+`ctx.compact()`, never blocks ordinary agent tools, and never rewrites the saved
+Pi transcript.
 
-It is for the common agent-harness failure mode: searches, file reads, test logs,
-ReamerX packs, shell output, subagent results, and diffs pile up until yesterday's
-noise crowds out today's task.
+## What v0.2 does
 
-## How it works
+The extension retires output in two ways:
 
-Before pruning, the model keeps carrying the full result:
+1. Provably redundant output is retired immediately: exact duplicates,
+   zero-result searches, older file reads fully covered by a newer range, and
+   exploratory ReamerX results superseded by a terminal result.
+2. Unique low-risk output becomes eligible only after one provider pass. When
+   active tool output exceeds its budget, the oldest safe results are retired.
 
-```text
-ffgrep "renderPressure"
-  src/render.ts:120 ...
-  src/render.ts:121 ...
-  ... hundreds of lines ...
-```
-
-After pruning, Pi sends the model a restorable card:
+The active tool-output budget is:
 
 ```text
-[pruned:pc_0007_a91c2f search/ffgrep "renderPressure" ~1800t
- card="search returned 2 top paths | evidence: src/render.ts; index.ts"
- restore="restore_chunks({ids:['pc_0007_a91c2f']})"]
+clamp(contextWindow × 25%, 8,192, 65,536) tokens
 ```
 
-Restore the exact content when needed:
+By default, the extension preserves:
 
-```ts
-restore_chunks({ ids: ["pc_0007_a91c2f"] })
-```
+- high-risk output, current failures, and diffs;
+- active paths and reasoning anchors;
+- restored content during its grace period;
+- the six newest results; and
+- results younger than three minutes.
 
-## Highlights
+Crossing 70% context usage has no special meaning in v0.2. A rare emergency
+sweep can retire safe old tool output above `contextWindow - 8,192` to create
+response headroom. It runs at most once until tracked content changes or usage
+grows another 2,048 tokens. Pi then decides whether conversation compaction is
+needed.
 
-- Tracks large tool results from reads, searches, shell/test output, diffs,
-  ReamerX/FlowTrace packs, subagents, and generic tools.
-- Prunes manually or automatically when context pressure rises.
-- Leaves transparent tombstones with IDs, token estimates, summaries, source
-  hints, and restore instructions.
-- Restores from same-session memory, optional disk cache, or source ranges.
-- Protects high-risk chunks, pins, recent restores, active paths, reasoning
-  anchors, failures, diffs, and continuation state.
-- Coalesces many old tombstones when message overhead becomes the problem.
-- Supports profiles for local, cloud, privacy, research, coding, and debugging
-  workloads.
-- Emits telemetry reports without raw tool output.
+## Provider safety and restore
 
-See the detailed docs for policy and edge cases:
+Full retirement removes both the matching assistant tool-call block and its
+tool result from the provider copy. Sibling calls and assistant text remain.
+Malformed or partial structures use a neutral, provider-valid fallback. Large
+results can be partially trimmed with a neutral marker.
 
-- [Architecture](docs/architecture.md)
-- [Auto-prune policy](docs/auto-prune-policy.md)
-- [Tool adapters](docs/tool-adapters.md)
-- [Failure modes](docs/failure-modes.md)
-- [Testing](docs/testing.md)
+Exact retired content remains available to the user. It is archived only when
+retired, using queued atomic writes and a memory index. Cache cleanup is
+scheduled rather than performed on every result.
 
 ## Install
 
@@ -64,7 +55,7 @@ See the detailed docs for policy and edge cases:
 pi --extension /path/to/pi-prune-chunks
 ```
 
-Or in Pi settings:
+Or add it to Pi settings:
 
 ```json
 {
@@ -72,107 +63,88 @@ Or in Pi settings:
 }
 ```
 
-The default profile is `coding-heavy`: conservative enough for normal coding,
-but active before emergency compaction.
+## Human commands
 
-## Use it in a session
-
-```ts
-context_pressure()
-list_context_chunks({ sortBy: "tokens", limit: 10 })
-prune_chunks({ ids: ["pc_0007_a91c2f"], reason: "old search; top paths are enough" })
-pin_chunks({ ids: ["pc_0012_deadbe"], reason: "current failing test log" })
-restore_chunks({ ids: ["pc_0007_a91c2f"] })
-context_report()
-```
-
-Slash commands mirror the tools:
+These commands are for inspection and explicit user control; none are exposed
+to the model:
 
 ```text
 /prune-status
 /prune-largest --limit 20
 /prune-suggest --limit 10
 /prune-now --dry-run
-/prune-restore pc_0001_a1b2c3
+/prune-now pc_123456789abc
+/prune-restore pc_123456789abc
 /prune-report --output prune-report.md
-/prune-profile local-32k
-/prune-profile reset
 ```
 
 ## Configuration
 
-Most users should start with a profile:
+The defaults are usually sufficient. All v0.2 policy settings are explicit:
 
 ```json
 {
   "pruneChunks": {
-    "profile": "coding-heavy"
-  }
-}
-```
-
-Useful alternatives:
-
-```json
-{ "pruneChunks": { "profile": "local-32k" } }
-{ "pruneChunks": { "profile": "privacy-max" } }
-{ "pruneChunks": { "profile": "research-heavy" } }
-```
-
-Override only what you need:
-
-```json
-{
-  "pruneChunks": {
-    "profile": "coding-heavy",
-    "autoPrune": {
-      "startAtPercent": 70,
-      "targetPercent": 55,
-      "maxChunksPerPass": 10
+    "budget": {
+      "windowFraction": 0.25,
+      "minTokens": 8192,
+      "maxTokens": 65536,
+      "preserveRecentResults": 6,
+      "preserveRecentMinutes": 3
+    },
+    "emergency": {
+      "minResponseHeadroomTokens": 8192,
+      "retryAfterGrowthTokens": 2048
+    },
+    "track": {
+      "minChunkTokens": 200,
+      "maxSummaryChars": 180
     },
     "restore": {
+      "memory": true,
+      "sourceRehydrate": true,
       "diskCache": {
         "enabled": true,
-        "directory": "~/.pi/prune-chunks/cache",
+        "directory": "~/.pi/prune-chunks/cache-v2",
         "maxBytes": 262144000,
         "maxAgeDays": 14,
         "maxBlobBytes": 26214400
       }
-    }
+    },
+    "debug": false
   }
 }
 ```
 
-## Safety model
+`enabled`, `trackTools`, `contextGuards`, `redundancy`, restore/cache, and debug
+controls are also configurable; see [the policy reference](docs/auto-prune-policy.md).
 
-- **Non-destructive:** saved transcript history is not rewritten or deleted.
-- **Restorable:** chunks can come back from memory, disk cache, or source ranges.
-- **Conservative by default:** high-risk, pinned, recent, restored, and active
-  working-context chunks are protected.
-- **Transparent:** pruned chunks leave IDs and restore hints unless pressure
-  forces compact markers.
-- **Bounded:** pressure reports distinguish chunk tokens from non-chunk context.
+## v0.1 migration
+
+v0.2 is intentionally breaking. Remove `profile`, `autoPrune`,
+`decisionCards`, `tombstones`, and `reamerx` policy blocks. The extension emits
+a clear startup error if it sees one of these keys instead of silently mapping
+old behavior.
+
+The following model-facing tools were removed:
+`list_context_chunks`, `prune_chunks`, `restore_chunks`, `pin_chunks`,
+`unpin_chunks`, `context_pressure`, and `context_report`. `/prune-profile` was
+also removed.
 
 ## Development
 
 ```bash
-PATH=/opt/homebrew/bin:$PATH npm run check
-PATH=/opt/homebrew/bin:$PATH npm run pack:dry
+npm run check
+npm run bench:churn
+npm run bench:cache
+npm run bench:replay
+npm run pack:dry
 ```
 
-Bench fixtures:
+Detailed design and acceptance notes:
 
-```bash
-PATH=/opt/homebrew/bin:$PATH npm run bench:policy-compare
-PATH=/opt/homebrew/bin:$PATH npm run bench:durable-store
-PATH=/opt/homebrew/bin:$PATH npm run bench:context-savings
-PATH=/opt/homebrew/bin:$PATH npm run bench:e2e-pruning
-```
-
-## Influences
-
-This is a practical Pi implementation experiment inspired by context-engineering
-work from Anthropic/Claude, Arize, LangChain, and recent long-horizon agent
-papers. It does not try to reproduce those systems. Its narrower bet is that, in
-Pi, bulky tool results should be addressable, auditable, cheap to hide, and easy
-to restore.
+- [Architecture](docs/architecture.md)
+- [Retirement policy](docs/auto-prune-policy.md)
+- [Tool adapters](docs/tool-adapters.md)
+- [Failure modes](docs/failure-modes.md)
+- [Testing](docs/testing.md)

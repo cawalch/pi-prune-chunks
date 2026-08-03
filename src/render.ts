@@ -1,56 +1,97 @@
-import { compactDecisionCard } from "./cards";
-import { renderContinuationManifestPreview } from "./manifest";
-import type { PruneCandidate } from "./pruner";
-import { contextPercent, pressureSummary } from "./pruner";
+import type { RetirementCandidate } from "./pruner";
+import { activeToolBudget, contextPercent } from "./pruner";
 import type { ChunkRegistry } from "./registry";
-import type {
-  ChunkActionResult,
-  ChunkListOutput,
-  ContextUsage,
-  ContinuationManifest,
-  PreserveContext,
-  PruneChunksConfig,
-} from "./types";
+import type { ChunkActionResult, ChunkListOutput, ContextUsage, PruneChunksConfig } from "./types";
 
 export function renderChunkList(output: ChunkListOutput): string {
-  if (output.chunks.length === 0) {
-    return "No tracked chunks found.";
-  }
-
+  if (output.chunks.length === 0) return "No tracked chunks found.";
   const lines = [
-    `Tracked chunks: ${output.totalChunks} total, ~${output.totalTokens}t tracked, ~${output.prunedTokens}t pruned`,
+    `Tracked chunks: ${output.totalChunks} total, ~${output.activeTokens}t active, ~${output.prunedTokens}t retired`,
     "",
-    "id              kind          risk    pin prune tokens restore          label",
+    "id                 kind          risk    state    tokens restore          label",
   ];
-
   for (const chunk of output.chunks) {
     lines.push(
       [
-        chunk.id.padEnd(15),
+        chunk.id.padEnd(18),
         chunk.kind.padEnd(13),
         chunk.risk.padEnd(7),
-        (chunk.pinned ? "yes" : "no ").padEnd(3),
-        (chunk.pruned ? "yes" : "no ").padEnd(5),
+        (chunk.pruned ? "retired" : "active").padEnd(8),
         String(chunk.tokenEstimate).padStart(6),
         restoreLabel(chunk).padEnd(16),
         labelWithScope(chunk),
       ].join(" "),
     );
-    if (chunk.decisionCard) {
-      lines.push(`  card: ${compactDecisionCard(chunk.decisionCard, 160)}`);
-    }
   }
-
   return lines.join("\n");
+}
+
+export function renderActionResults(
+  action: string,
+  ids: string[],
+  results: ChunkActionResult[],
+): string {
+  const changedStatus = action === "restored" ? "restored" : "pruned";
+  const changed = results.filter((result) => result.status === changedStatus).length;
+  const tokens = results.reduce((sum, result) => sum + result.tokens, 0);
+  const lines = [
+    `${capitalize(action)} ${changed}/${ids.length} chunks, ~${tokens} tokens affected`,
+    "",
+  ];
+  for (const result of results) {
+    const reason = result.reason ? ` (${result.reason})` : "";
+    const mode = result.restoreMode ? ` via ${result.restoreMode}` : "";
+    lines.push(`  ${result.id}: ${result.status}${mode} (~${result.tokens}t)${reason}`);
+  }
+  return lines.join("\n");
+}
+
+export function renderCandidates(candidates: RetirementCandidate[]): string {
+  if (candidates.length === 0) return "No safe retirement candidates found.";
+  return candidates
+    .map(
+      (item) =>
+        `  ${item.id}: ${item.kind}/${item.risk} ~${item.tokenEstimate}t ${item.label}; ${item.reason}`,
+    )
+    .join("\n");
+}
+
+export function renderStatus(
+  registry: ChunkRegistry,
+  usage: ContextUsage | null | undefined,
+  config: PruneChunksConfig,
+): string {
+  const summary = registry.summary();
+  const budget = activeToolBudget(usage?.contextWindow, config);
+  const percent = contextPercent(usage);
+  const provider =
+    usage?.tokens != null && usage.contextWindow
+      ? `~${usage.tokens}/${usage.contextWindow} (${percent == null ? "?" : Math.round(percent)}%)`
+      : "unknown";
+  return [
+    `Provider context: ${provider}`,
+    `Tool-output working set: ~${summary.activeTokens}/${budget} tokens`,
+    `Tracked: ${summary.totalChunks}; retired: ${summary.prunedChunks} (~${summary.prunedTokens}t)`,
+    `Budget: clamp(window × ${config.budget.windowFraction}, ${config.budget.minTokens}, ${config.budget.maxTokens})`,
+    `Emergency headroom: ${config.emergency.minResponseHeadroomTokens} tokens; Pi owns compaction`,
+  ].join("\n");
+}
+
+export function contextFooter(
+  registry: ChunkRegistry,
+  usage: ContextUsage | null | undefined,
+  config: PruneChunksConfig,
+): string {
+  const summary = registry.summary();
+  const budget = activeToolBudget(usage?.contextWindow, config);
+  const percent = contextPercent(usage);
+  return `[Context: ${percent == null ? "?" : Math.round(percent)}% | tool output: ~${summary.activeTokens}/${budget}t | retired: ${summary.prunedChunks}]`;
 }
 
 function labelWithScope(chunk: ChunkListOutput["chunks"][number]): string {
   const markers: string[] = [];
   if (chunk.part) markers.push(`part:${chunk.part.role}`);
-  if (chunk.scope && chunk.scope.scope !== "main") {
-    const details = [chunk.scope.agentName, chunk.scope.runId].filter(Boolean).join("/");
-    markers.push(details ? `scope:${chunk.scope.scope}:${details}` : `scope:${chunk.scope.scope}`);
-  }
+  if (chunk.scope && chunk.scope.scope !== "main") markers.push(`scope:${chunk.scope.scope}`);
   return markers.length > 0 ? `${chunk.label} [${markers.join(" ")}]` : chunk.label;
 }
 
@@ -59,107 +100,6 @@ function restoreLabel(chunk: ChunkListOutput["chunks"][number]): string {
   return chunk.restoreUnavailableReason
     ? `unavailable: ${chunk.restoreUnavailableReason}`
     : "unavailable";
-}
-
-export function renderActionResults(
-  action: string,
-  ids: string[],
-  results: ChunkActionResult[],
-): string {
-  const changed = results.filter((result) => result.status === action).length;
-  const tokens = results.reduce((sum, result) => sum + result.tokens, 0);
-  const lines = [
-    `${capitalize(action)} ${changed}/${ids.length} chunks, ~${tokens} tokens affected`,
-    "",
-  ];
-  for (const result of results) {
-    const detail = result.reason ? ` (${result.reason})` : "";
-    const mode = result.restoreMode ? ` via ${result.restoreMode}` : "";
-    lines.push(`  ${result.id}: ${result.status}${mode} (~${result.tokens}t)${detail}`);
-  }
-  return lines.join("\n");
-}
-
-export function renderPressure(
-  registry: ChunkRegistry,
-  usage: ContextUsage | null | undefined,
-  config: PruneChunksConfig,
-  preserve?: PreserveContext,
-  continuationManifest?: ContinuationManifest,
-): string {
-  const pressure = pressureSummary(registry, usage, config, preserve);
-  const pct = pressure.autoPrune.currentPercent;
-  const providerTokens =
-    usage?.tokens != null && usage.contextWindow != null
-      ? ` (~${usage.tokens}/${usage.contextWindow} provider tokens)`
-      : "";
-  const lines = [
-    `Context pressure: ${pct == null ? "unknown" : `${Math.round(pct)}%${providerTokens}`}`,
-    `Active chunk tokens: ~${pressure.estimatedActiveChunkTokens}`,
-    `Pruned chunk tokens: ~${pressure.estimatedPrunedTokens}`,
-    `Auto-prune: ${pressure.autoPrune.enabled ? "enabled" : "disabled"} profile=${pressure.autoPrune.profile} policy=${pressure.autoPrune.policy} model=${pressure.autoPrune.modelProfile} band=${pressure.autoPrune.pressureBand} start=${pressure.autoPrune.startAtPercent}% target=${pressure.autoPrune.targetPercent}%`,
-  ];
-
-  if (pressure.autoPrune.nonChunkTokens != null) {
-    const bestPossible =
-      pressure.autoPrune.bestPossiblePercent == null
-        ? "unknown"
-        : `${Math.round(pressure.autoPrune.bestPossiblePercent)}%`;
-    lines.push(
-      `Non-chunk tokens: ~${pressure.autoPrune.nonChunkTokens}; best possible after chunk pruning: ${bestPossible}`,
-    );
-    if (pressure.autoPrune.targetReachableByChunks === false) {
-      lines.push("Auto-prune target cannot be reached by pruning tracked chunks alone.");
-    }
-  }
-
-  if (pressure.recommendedCandidates.length > 0) {
-    lines.push("", "Recommended prune candidates:");
-    for (const candidate of pressure.recommendedCandidates.slice(0, 5)) {
-      lines.push(renderCandidate(candidate));
-    }
-  }
-
-  if (pressure.blockedCandidates.length > 0) {
-    lines.push("", "Protected active chunks:");
-    for (const candidate of pressure.blockedCandidates.slice(0, 5)) {
-      lines.push(
-        `  ${candidate.id}: ${candidate.kind}/${candidate.risk} ~${candidate.tokenEstimate}t ${candidate.label}; ${candidate.reason}`,
-      );
-    }
-  }
-
-  if (continuationManifest) {
-    lines.push("", renderContinuationManifestPreview(continuationManifest));
-  }
-
-  return lines.join("\n");
-}
-
-export function renderCandidates(candidates: PruneCandidate[]): string {
-  if (candidates.length === 0) return "No safe prune candidates found.";
-  return candidates.map(renderCandidate).join("\n");
-}
-
-export function contextFooter(
-  registry: ChunkRegistry,
-  usage: ContextUsage | null | undefined,
-): string {
-  const summary = registry.summary();
-  const pct = contextPercent(usage);
-  const tokenStr = usage?.tokens != null ? `~${usage.tokens}` : "?";
-  const windowStr = usage?.contextWindow != null ? String(usage.contextWindow) : "?";
-  const pctStr = pct == null ? "?%" : `${Math.round(pct)}%`;
-  return (
-    `[Context: ${tokenStr}/${windowStr} (${pctStr}) | ` +
-    `chunks: ${summary.totalChunks} tracked, ${summary.prunedChunks} pruned, ` +
-    `~${summary.activeTokens}t active]`
-  );
-}
-
-function renderCandidate(candidate: PruneCandidate): string {
-  const reasons = candidate.reasons.length > 0 ? `; ${candidate.reasons.join(", ")}` : "";
-  return `  ${candidate.id}: ${candidate.kind}/${candidate.risk} ~${candidate.tokenEstimate}t score=${Math.round(candidate.score)} confidence=${candidate.confidence} ${candidate.label}${reasons}`;
 }
 
 function capitalize(text: string): string {

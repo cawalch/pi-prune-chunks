@@ -1,22 +1,18 @@
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { promisify } from "node:util";
+import { gunzipSync, gzip } from "node:zlib";
 import { hashText } from "./text";
 import type { ChunkContentCache, ContentBlock, DiskCacheConfig } from "./types";
 
-const INDEX_VERSION = 1;
+const gzipAsync = promisify(gzip);
+const INDEX_VERSION = 2;
+const CLEANUP_INTERVAL = 64;
 
 interface DiskCacheIndexEntry {
-  version: 1;
+  version: 2;
   id: string;
   hash: string;
   createdAt: number;
@@ -25,27 +21,43 @@ interface DiskCacheIndexEntry {
   storedBytes: number;
 }
 
+export type DiskCacheInstrumentation = {
+  directoryScans: number;
+  archives: number;
+  cleanups: number;
+};
+
 export class DiskChunkContentCache implements ChunkContentCache {
   private readonly root: string;
   private readonly maxBytes: number;
   private readonly maxBlobBytes: number;
   private readonly maxAgeMs: number;
+  private readonly entries = new Map<string, DiskCacheIndexEntry>();
+  private readonly metrics: DiskCacheInstrumentation = {
+    directoryScans: 0,
+    archives: 0,
+    cleanups: 0,
+  };
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(config: DiskCacheConfig) {
     this.root = path.resolve(expandHome(config.directory ?? defaultDiskCacheDirectory()));
     this.maxBytes = Math.max(0, config.maxBytes);
     this.maxBlobBytes = Math.max(0, config.maxBlobBytes);
-    this.maxAgeMs = Math.max(0, config.maxAgeDays) * 24 * 60 * 60 * 1000;
+    this.maxAgeMs = Math.max(0, config.maxAgeDays) * 24 * 60 * 60 * 1_000;
     this.ensureDirectories();
+    this.loadIndex();
+    this.cleanup();
   }
 
   get(id: string, mode?: "memory" | "disk_cache"): ContentBlock[] | undefined {
     if (mode === "memory") return undefined;
-    const entry = this.readIndex(id);
+    const entry = this.entries.get(id);
     if (!entry) return undefined;
     try {
-      const compressed = readFileSync(this.blobPath(entry.hash));
-      const parsed = JSON.parse(gunzipSync(compressed).toString("utf8")) as unknown;
+      const parsed = JSON.parse(
+        gunzipSync(readFileSync(this.blobPath(entry.hash))).toString("utf8"),
+      ) as unknown;
       if (!Array.isArray(parsed)) return undefined;
       return parsed.map((block) => ({ ...(block as ContentBlock) }));
     } catch {
@@ -53,20 +65,28 @@ export class DiskChunkContentCache implements ChunkContentCache {
     }
   }
 
-  set(id: string, content: ContentBlock[]): void {
+  /** Disk storage is archive-only in v0.2; active results stay in memory. */
+  set(_id: string, _content: ContentBlock[]): void {}
+
+  async archive(id: string, content: ContentBlock[]): Promise<void> {
+    const task = this.writeQueue.then(() => this.archiveNow(id, content));
+    this.writeQueue = task.catch(() => undefined);
+    return task;
+  }
+
+  private async archiveNow(id: string, content: ContentBlock[]): Promise<void> {
     const serialized = stableSerializeContent(content);
     const rawBytes = Buffer.byteLength(serialized, "utf8");
     if (this.maxBlobBytes > 0 && rawBytes > this.maxBlobBytes) return;
 
-    this.ensureDirectories();
     const hash = hashText(serialized);
     const blobPath = this.blobPath(hash);
     if (!existsSync(blobPath)) {
-      writeFileSync(blobPath, gzipSync(serialized));
+      const compressed = await gzipAsync(serialized);
+      await atomicWrite(blobPath, compressed);
     }
-    const storedBytes = statSync(blobPath).size;
     const now = Date.now();
-    const previous = this.readIndex(id);
+    const previous = this.entries.get(id);
     const entry: DiskCacheIndexEntry = {
       version: INDEX_VERSION,
       id,
@@ -74,28 +94,34 @@ export class DiskChunkContentCache implements ChunkContentCache {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
       rawBytes,
-      storedBytes,
+      storedBytes: statSync(blobPath).size,
     };
-    writeFileSync(this.indexPath(id), JSON.stringify(entry, null, 2));
-    this.enforceLimits();
+    await atomicWrite(this.indexPath(id), JSON.stringify(entry));
+    this.entries.set(id, entry);
+    this.metrics.archives += 1;
+
+    if (
+      this.metrics.archives % CLEANUP_INTERVAL === 0 ||
+      (this.maxBytes > 0 && this.totalStoredBytes() > this.maxBytes)
+    ) {
+      this.cleanup();
+    }
   }
 
-  // Removes the id->blob index only. The (content-addressed, possibly shared)
-  // blob is reclaimed by removeUnreferencedBlobs() during enforceLimits() on
-  // the next set(). delete() is only called from within enforceLimits today
-  // (expiry/trim), so orphans never accumulate outside that sweep.
   delete(id: string): void {
+    this.entries.delete(id);
     rmSync(this.indexPath(id), { force: true });
   }
 
   has(id: string, mode?: "memory" | "disk_cache"): boolean {
     if (mode === "memory") return false;
-    const entry = this.readIndex(id);
+    const entry = this.entries.get(id);
     return !!entry && existsSync(this.blobPath(entry.hash));
   }
 
   clear(): void {
     rmSync(this.root, { recursive: true, force: true });
+    this.entries.clear();
     this.ensureDirectories();
   }
 
@@ -103,51 +129,63 @@ export class DiskChunkContentCache implements ChunkContentCache {
     return this.root;
   }
 
+  instrumentation(): DiskCacheInstrumentation {
+    return { ...this.metrics };
+  }
+
   private ensureDirectories(): void {
     mkdirSync(this.blobsDir(), { recursive: true });
     mkdirSync(this.indexDir(), { recursive: true });
   }
 
-  private enforceLimits(): void {
-    if (this.maxAgeMs > 0) this.removeExpiredEntries();
-    if (this.maxBytes > 0) this.trimToMaxBytes();
+  private loadIndex(): void {
+    this.metrics.directoryScans += 1;
+    for (const name of listDirNames(this.indexDir())) {
+      const entry = this.readIndexFile(path.join(this.indexDir(), name));
+      if (entry) this.entries.set(entry.id, entry);
+    }
+  }
+
+  private cleanup(): void {
+    this.metrics.cleanups += 1;
+    const cutoff = Date.now() - this.maxAgeMs;
+    if (this.maxAgeMs > 0) {
+      for (const entry of this.entries.values()) {
+        if (entry.updatedAt < cutoff) this.delete(entry.id);
+      }
+    }
+    if (this.maxBytes > 0) {
+      const oldest = [...this.entries.values()].sort((a, b) => a.updatedAt - b.updatedAt);
+      while (this.totalStoredBytes() > this.maxBytes && oldest.length > 0) {
+        const entry = oldest.shift();
+        if (entry) this.delete(entry.id);
+      }
+    }
     this.removeUnreferencedBlobs();
   }
 
-  private removeExpiredEntries(): void {
-    const cutoff = Date.now() - this.maxAgeMs;
-    for (const entry of this.indexEntries()) {
-      if (entry.updatedAt < cutoff) this.delete(entry.id);
-    }
-  }
-
-  private trimToMaxBytes(): void {
-    const entries = this.indexEntries().sort((a, b) => a.updatedAt - b.updatedAt);
-    let total = totalStoredBytes(entries);
-    while (total > this.maxBytes && entries.length > 0) {
-      const oldest = entries.shift();
-      if (!oldest) break;
-      this.delete(oldest.id);
-      total = totalStoredBytes(entries);
-    }
-  }
-
   private removeUnreferencedBlobs(): void {
-    const referenced = new Set(this.indexEntries().map((entry) => entry.hash));
+    this.metrics.directoryScans += 1;
+    const referenced = new Set([...this.entries.values()].map((entry) => entry.hash));
     for (const name of listDirNames(this.blobsDir())) {
+      if (name.endsWith(".tmp")) {
+        rmSync(path.join(this.blobsDir(), name), { force: true });
+        continue;
+      }
       const hash = blobHashFromFileName(name);
       if (hash && !referenced.has(hash)) rmSync(path.join(this.blobsDir(), name), { force: true });
     }
   }
 
-  private indexEntries(): DiskCacheIndexEntry[] {
-    return listDirNames(this.indexDir())
-      .map((name) => this.readIndexFile(path.join(this.indexDir(), name)))
-      .filter((entry): entry is DiskCacheIndexEntry => !!entry);
-  }
-
-  private readIndex(id: string): DiskCacheIndexEntry | undefined {
-    return this.readIndexFile(this.indexPath(id));
+  private totalStoredBytes(): number {
+    const hashes = new Set<string>();
+    let total = 0;
+    for (const entry of this.entries.values()) {
+      if (hashes.has(entry.hash)) continue;
+      hashes.add(entry.hash);
+      total += entry.storedBytes;
+    }
+    return total;
   }
 
   private readIndexFile(filePath: string): DiskCacheIndexEntry | undefined {
@@ -157,21 +195,14 @@ export class DiskChunkContentCache implements ChunkContentCache {
         parsed.version !== INDEX_VERSION ||
         typeof parsed.id !== "string" ||
         typeof parsed.hash !== "string" ||
+        typeof parsed.createdAt !== "number" ||
         typeof parsed.updatedAt !== "number" ||
         typeof parsed.rawBytes !== "number" ||
         typeof parsed.storedBytes !== "number"
       ) {
         return undefined;
       }
-      return {
-        version: INDEX_VERSION,
-        id: parsed.id,
-        hash: parsed.hash,
-        createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : parsed.updatedAt,
-        updatedAt: parsed.updatedAt,
-        rawBytes: parsed.rawBytes,
-        storedBytes: parsed.storedBytes,
-      };
+      return parsed as DiskCacheIndexEntry;
     } catch {
       return undefined;
     }
@@ -208,7 +239,10 @@ export class CompositeChunkContentCache implements ChunkContentCache {
 
   set(id: string, content: ContentBlock[]): void {
     this.memory.set(id, content);
-    this.disk?.set(id, content);
+  }
+
+  async archive(id: string, content: ContentBlock[]): Promise<void> {
+    await this.disk?.archive(id, content);
   }
 
   delete(id: string): void {
@@ -229,8 +263,18 @@ export class CompositeChunkContentCache implements ChunkContentCache {
 
 export function defaultDiskCacheDirectory(): string {
   return (
-    process.env.PI_PRUNE_CHUNKS_CACHE_DIR ?? path.join(homedir(), ".pi", "prune-chunks", "cache")
+    process.env.PI_PRUNE_CHUNKS_CACHE_DIR ?? path.join(homedir(), ".pi", "prune-chunks", "cache-v2")
   );
+}
+
+async function atomicWrite(destination: string, data: string | Uint8Array): Promise<void> {
+  const temporary = `${destination}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await writeFile(temporary, data);
+    await rename(temporary, destination);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
 
 function expandHome(directory: string): string {
@@ -263,24 +307,8 @@ function safePathPart(value: string): string {
 
 function listDirNames(directory: string): string[] {
   try {
-    return mkdirAndList(directory);
+    return readdirSync(directory);
   } catch {
     return [];
   }
-}
-
-function mkdirAndList(directory: string): string[] {
-  mkdirSync(directory, { recursive: true });
-  return readdirSync(directory);
-}
-
-function totalStoredBytes(entries: DiskCacheIndexEntry[]): number {
-  const hashes = new Set<string>();
-  let total = 0;
-  for (const entry of entries) {
-    if (hashes.has(entry.hash)) continue;
-    hashes.add(entry.hash);
-    total += entry.storedBytes;
-  }
-  return total;
 }

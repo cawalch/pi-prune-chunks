@@ -10,8 +10,8 @@ import type {
   ContentBlock,
   ContextChunk,
   ListChunksOptions,
-  PersistedPruneChunksState,
   RestoreMode,
+  StateDeltaAction,
 } from "./types";
 
 const RISK_ORDER: Record<string, number> = {
@@ -32,6 +32,10 @@ export class MemoryChunkContentCache implements ChunkContentCache {
     this.content.set(id, cloneContent(content));
   }
 
+  async archive(id: string, content: ContentBlock[]): Promise<void> {
+    if (!this.content.has(id)) this.set(id, content);
+  }
+
   delete(id: string): void {
     this.content.delete(id);
   }
@@ -50,7 +54,7 @@ export class ChunkRegistry {
   private readonly chunks = new Map<string, ContextChunk>();
   private readonly toolCallIndex = new Map<string, string>();
   private readonly auditEvents: ChunkAuditEvent[] = [];
-  private counter = 0;
+  private revisionCounter = 0;
 
   constructor(private readonly cache: ChunkContentCache = new MemoryChunkContentCache()) {}
 
@@ -66,8 +70,8 @@ export class ChunkRegistry {
         existing.tokenEstimate = collected.tokenEstimate;
         existing.scope = collected.scope;
         existing.summary = collected.summary;
-        existing.decisionCard = collected.decisionCard;
         this.cache.set(existing.id, collected.content);
+        this.revisionCounter += 1;
         return existing;
       }
     }
@@ -95,7 +99,6 @@ export class ChunkRegistry {
       pruned: false,
       pinned: false,
       summary: collected.summary,
-      decisionCard: collected.decisionCard,
       source: collected.source,
       restoreMode,
       restoreAvailable: restoreMode !== "unavailable",
@@ -110,6 +113,7 @@ export class ChunkRegistry {
     this.cache.set(id, collected.content);
     this.audit(id, "tracked", undefined, now);
     this.addPartChunks(chunk, collected, parts, now);
+    this.revisionCounter += 1;
     return chunk;
   }
 
@@ -189,7 +193,6 @@ export class ChunkRegistry {
         restoreAvailable: chunk.restoreAvailable,
         restoreUnavailableReason: chunk.restoreUnavailableReason,
         summary: chunk.summary,
-        decisionCard: chunk.decisionCard,
         source: chunk.source,
         createdAt: chunk.createdAt,
         lastRestoredAt: chunk.lastRestoredAt,
@@ -223,11 +226,38 @@ export class ChunkRegistry {
     return this.all().some((chunk) => chunk.parentId === id);
   }
 
-  markSeenByToolCallId(toolCallId: string, now = Date.now()): void {
+  revision(): number {
+    return this.revisionCounter;
+  }
+
+  async archive(ids: string[]): Promise<void> {
+    const family = this.familyOf(ids);
+    await Promise.all(
+      family.map(async (id) => {
+        const content = this.cache.get(id, "memory");
+        if (content) await this.cache.archive(id, content);
+      }),
+    );
+    for (const id of family) {
+      const chunk = this.chunks.get(id);
+      if (!chunk) continue;
+      if (this.cache.has(id, "disk_cache")) {
+        chunk.restoreMode = "disk_cache";
+        chunk.restoreAvailable = true;
+        chunk.restoreUnavailableReason = undefined;
+      }
+    }
+  }
+
+  markSeenByToolCallId(toolCallId: string, now = Date.now()): boolean {
     const chunk = this.getByToolCallId(toolCallId);
-    if (!chunk) return;
-    chunk.lastSeenAt = now;
-    chunk.updatedAt = now;
+    if (!chunk || chunk.lastSeenAt != null) return false;
+    for (const id of this.familyOf([chunk.id])) {
+      const member = this.chunks.get(id);
+      if (!member) continue;
+      member.lastSeenAt = now;
+    }
+    return true;
   }
 
   /**
@@ -273,6 +303,7 @@ export class ChunkRegistry {
       chunk.pruneReason = reason;
       chunk.updatedAt = now;
       this.audit(id, action, reason, now);
+      this.revisionCounter += 1;
       return { id, status: "pruned", tokens: chunk.tokenEstimate };
     });
   }
@@ -291,6 +322,7 @@ export class ChunkRegistry {
     chunk.restoreCount = (chunk.restoreCount ?? 0) + 1;
     chunk.updatedAt = now;
     this.audit(id, mode === "source_rehydrate" ? "rehydrated" : "restored", undefined, now);
+    this.revisionCounter += 1;
     return { id, status: "restored", tokens: chunk.tokenEstimate, restoreMode: mode };
   }
 
@@ -304,6 +336,10 @@ export class ChunkRegistry {
     presentToolCallIds: Set<string>,
     reason = "evicted from context",
   ): ChunkActionResult[] {
+    return this.prune(this.absentFromContext(presentToolCallIds), reason, "auto_pruned");
+  }
+
+  absentFromContext(presentToolCallIds: Set<string>, allowEmpty = false): string[] {
     const mainSeen = this.active().filter(
       (chunk) =>
         (chunk.scope?.scope ?? "main") === "main" &&
@@ -314,16 +350,11 @@ export class ChunkRegistry {
     const presentCount = mainSeen.filter((chunk) =>
       presentToolCallIds.has(chunk.source?.toolCallId ?? ""),
     ).length;
-    if (presentCount === 0) return [];
+    if (presentCount === 0 && !allowEmpty) return [];
     const absent = mainSeen.filter(
       (chunk) => !presentToolCallIds.has(chunk.source?.toolCallId ?? ""),
     );
-    if (absent.length === 0) return [];
-    return this.prune(
-      absent.map((chunk) => chunk.id),
-      reason,
-      "auto_pruned",
-    );
+    return absent.map((chunk) => chunk.id);
   }
 
   pin(ids: string[], reason?: string): ChunkActionResult[] {
@@ -337,6 +368,7 @@ export class ChunkRegistry {
       chunk.pinReason = reason;
       chunk.updatedAt = now;
       this.audit(id, "pinned", reason, now);
+      this.revisionCounter += 1;
       return { id, status: "pinned", tokens: chunk.tokenEstimate };
     });
   }
@@ -352,6 +384,7 @@ export class ChunkRegistry {
       chunk.pinReason = undefined;
       chunk.updatedAt = now;
       this.audit(id, "unpinned", undefined, now);
+      this.revisionCounter += 1;
       return { id, status: "unpinned", tokens: chunk.tokenEstimate };
     });
   }
@@ -424,59 +457,21 @@ export class ChunkRegistry {
     return this.auditEvents.slice(-Math.max(0, limit));
   }
 
-  persistenceState(): PersistedPruneChunksState {
-    return {
-      version: 1,
-      chunks: this.all().map((chunk) => ({
-        ...chunk,
-        decisionCard: chunk.decisionCard
-          ? {
-              ...chunk.decisionCard,
-              evidence: [...chunk.decisionCard.evidence],
-              restoreWhen: [...chunk.decisionCard.restoreWhen],
-              safeToIgnoreWhen: chunk.decisionCard.safeToIgnoreWhen
-                ? [...chunk.decisionCard.safeToIgnoreWhen]
-                : undefined,
-              sourceAnchors: chunk.decisionCard.sourceAnchors
-                ? [...chunk.decisionCard.sourceAnchors]
-                : undefined,
-              hazards: chunk.decisionCard.hazards ? [...chunk.decisionCard.hazards] : undefined,
-            }
-          : undefined,
-        source: chunk.source ? { ...chunk.source } : undefined,
-        scope: chunk.scope ? { ...chunk.scope } : undefined,
-      })),
-      audit: this.auditTrail(200),
-    };
-  }
-
-  restorePersistence(state: PersistedPruneChunksState | undefined | null): number {
-    if (!state || state.version !== 1 || !Array.isArray(state.chunks)) return 0;
-
-    this.chunks.clear();
-    this.toolCallIndex.clear();
-    this.auditEvents.splice(0, this.auditEvents.length, ...(state.audit ?? []));
-    this.counter = 0;
-
-    for (const persisted of state.chunks) {
-      const chunk = cloneChunk(persisted);
-      const sourceMode = inferRestoreMode(
-        this.cache.has(chunk.id, "memory"),
-        chunk.source,
-        this.cache.has(chunk.id, "disk_cache"),
-      );
-      chunk.restoreMode = sourceMode;
-      chunk.restoreAvailable = sourceMode !== "unavailable";
-      chunk.restoreUnavailableReason =
-        sourceMode === "unavailable" ? restoreUnavailableReason(false, chunk.source) : undefined;
-      this.chunks.set(chunk.id, chunk);
-      if (chunk.source?.toolCallId) {
-        this.toolCallIndex.set(chunk.source.toolCallId, chunk.id);
-      }
-      this.counter = Math.max(this.counter, counterFromId(chunk.id));
+  applyDelta(action: StateDeltaAction): boolean {
+    const chunk = this.chunks.get(action.id);
+    if (!chunk) return false;
+    if (action.state === "pruned") {
+      this.prune([action.id], action.reason, "auto_pruned");
+      return true;
     }
-
-    return this.chunks.size;
+    if (chunk.pruned) {
+      this.restore(
+        action.id,
+        this.cache.has(action.id, "disk_cache") ? "disk_cache" : "memory",
+        action.timestamp,
+      );
+    }
+    return true;
   }
 
   reset(): void {
@@ -484,7 +479,7 @@ export class ChunkRegistry {
     this.toolCallIndex.clear();
     this.auditEvents.length = 0;
     this.cache.clear();
-    this.counter = 0;
+    this.revisionCounter = 0;
   }
 
   private addPartChunks(
@@ -529,7 +524,6 @@ export class ChunkRegistry {
         pruneReason: undefined,
         pinReason: undefined,
         summary: collected.summary,
-        decisionCard: collected.decisionCard,
         restoreMode: inferRestoreMode(true, parent.source, this.cache.has(id, "disk_cache")),
         restoreAvailable: true,
         restoreUnavailableReason: undefined,
@@ -541,10 +535,7 @@ export class ChunkRegistry {
   }
 
   private nextChunkId(toolCallId: string, toolName: string, text: string): string {
-    this.counter++;
-    const counterPart = this.counter.toString(36).padStart(4, "0");
-    const hash = hashText(`${toolCallId}\n${toolName}\n${text}`).slice(0, 6);
-    return `pc_${counterPart}_${hash}`;
+    return `pc_${hashText(`${toolCallId}\n${toolName}\n${text}`).slice(0, 12)}`;
   }
 
   private audit(
@@ -588,28 +579,6 @@ function cloneContent(content: ContentBlock[]): ContentBlock[] {
   return content.map((block) => ({ ...block }));
 }
 
-function cloneChunk(chunk: ContextChunk): ContextChunk {
-  return {
-    ...chunk,
-    decisionCard: chunk.decisionCard
-      ? {
-          ...chunk.decisionCard,
-          evidence: [...chunk.decisionCard.evidence],
-          restoreWhen: [...chunk.decisionCard.restoreWhen],
-          safeToIgnoreWhen: chunk.decisionCard.safeToIgnoreWhen
-            ? [...chunk.decisionCard.safeToIgnoreWhen]
-            : undefined,
-          sourceAnchors: chunk.decisionCard.sourceAnchors
-            ? [...chunk.decisionCard.sourceAnchors]
-            : undefined,
-          hazards: chunk.decisionCard.hazards ? [...chunk.decisionCard.hazards] : undefined,
-        }
-      : undefined,
-    source: chunk.source ? { ...chunk.source } : undefined,
-    scope: chunk.scope ? { ...chunk.scope } : undefined,
-  };
-}
-
 function incrementBucket<K extends string>(
   buckets: Record<K, { count: number; tokens: number }>,
   key: K,
@@ -628,11 +597,6 @@ function emptyRestoreBuckets(): Record<RestoreMode, { count: number; tokens: num
     source_rehydrate: { count: 0, tokens: 0 },
     unavailable: { count: 0, tokens: 0 },
   };
-}
-
-function counterFromId(id: string): number {
-  const match = /^pc_([0-9a-z]+)_/.exec(id);
-  return match ? parseInt(match[1], 36) : 0;
 }
 
 function sortChunks(chunks: ContextChunk[], sortBy: "tokens" | "age" | "recent" | "risk"): void {

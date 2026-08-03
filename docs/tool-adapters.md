@@ -1,31 +1,28 @@
-# Tool Adapters
+# Tool adapters
 
-The collector recognizes generic Pi tools plus Reamer and FlowTrace families.
+Tracking is deliberately generic. Known names improve classification, while
+`trackTools: ["*"]` allows arbitrary tool results to participate.
 
-Generic families:
+## Reads and searches
 
-- file reads: `read`, `file_read`, `view_file`, `open_file`, `cat`
-- searches: `search`, `ffgrep`, `grep`, `rg`, `ripgrep`
-- shell: `shell`, `bash`, `command`, `exec_command`, `terminal`
-- tests: `test`, `npm_test`, `pytest`, `go_test`
-- diffs: `diff`, `git_diff`
+Paths and line ranges are inferred from structured arguments first, then safe
+command/text patterns. Only complete newer range coverage retires an older read.
+Searches are low risk unless their content carries a current failure signal.
 
-Shell adapters inspect read-only commands before falling back to generic shell
-classification. `sed -n`, `cat`, `head`, `tail`, and `nl | sed` are treated as
-file reads with source path and line range when the command exposes them.
-`grep`, `rg`, and `ffgrep` commands are treated as search chunks and retain the
-command plus best-effort source path.
+## Shell, tests, and diffs
 
-Reamer families:
+Read-only bounded shell output may be low risk. Current test failures are high
+risk; successful test logs may become eligible after recency protection. Diffs
+are always excluded from automatic budget retirement.
 
-- `code_context`, `code_search`, `code_search_symbols`
-- `code_read_range`, `code_read_symbol`, `code_outline`, `code_related`
-- `code_pattern_search`, `code_semantic_search`, `code_flow_trace`
+## ReamerX and flow tools
 
-FlowTrace families:
+Repo maps, searches, symbols, traces, paths, impacts, and context tools are
+exploratory. Edit packs, slices, and changes are terminal results. A terminal
+result can supersede exploratory output only within the same recorded scope.
 
-- `flow_trace`, `flow_path`, `flow_impact`
+## Subagents
 
-Adapters infer kind, risk, label, source path, line range, command, token
-estimate, and short summary from tool name, parameters, command text, and
-content.
+Scope metadata is retained when tool events provide run, parent, or agent
+information. Live-context reconciliation requires at least one surviving main
+result, preventing a subagent context from evicting the root task's registry.
