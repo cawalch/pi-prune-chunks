@@ -1,5 +1,5 @@
 /**
- * Prune Chunks v0.2 - invisible hygiene for bulky tool output.
+ * Prune Chunks v0.3 - pressure-only safety rail for bulky tool output.
  */
 
 import { writeFile } from "node:fs/promises";
@@ -11,13 +11,11 @@ import { mergeConfig, type RawPruneChunksConfig } from "./src/config";
 import { compactFailedToolValidationMessages } from "./src/contextGuards";
 import { CompositeChunkContentCache, DiskChunkContentCache } from "./src/diskCache";
 import {
-  budgetRetirementPlan,
-  type EmergencySweepState,
-  emergencyRetirementPlan,
   manualRetirementPlan,
+  type PressureSweepState,
+  pressureRetirementPlan,
   type RetirementPlan,
-  redundantRetirements,
-  shouldRunEmergencySweep,
+  shouldRunPressureSweep,
 } from "./src/pruner";
 import { ChunkRegistry, MemoryChunkContentCache } from "./src/registry";
 import {
@@ -41,7 +39,7 @@ import type {
   StateDeltaAction,
 } from "./src/types";
 
-const STATE_TYPE = "prune-chunks-state-v2";
+const STATE_TYPE = "prune-chunks-state-v3";
 
 export default function (pi: ExtensionAPI) {
   let config: PruneChunksConfig;
@@ -56,12 +54,13 @@ export default function (pi: ExtensionAPI) {
   const registry = new ChunkRegistry(createContentCache(config));
   const telemetry = new TelemetryRecorder();
   const pendingArchives = new Set<Promise<void>>();
-  let emergencyState: EmergencySweepState | undefined;
+  let pressureState: PressureSweepState | undefined;
+  let pendingProviderRewrite = false;
   let reconcileAfterCompaction = false;
 
   function persistActions(actions: StateDeltaAction[]): void {
     if (actions.length === 0) return;
-    const delta: PersistedStateDelta = { version: 2, actions };
+    const delta: PersistedStateDelta = { version: 3, actions };
     pi.appendEntry(STATE_TYPE, delta);
   }
 
@@ -113,7 +112,8 @@ export default function (pi: ExtensionAPI) {
       config,
     );
     scheduleArchive(compactedIds);
-    emergencyState = undefined;
+    pressureState = undefined;
+    pendingProviderRewrite = false;
     reconcileAfterCompaction = false;
   });
 
@@ -121,13 +121,14 @@ export default function (pi: ExtensionAPI) {
     await Promise.allSettled([...pendingArchives]);
     registry.reset();
     telemetry.reset();
-    emergencyState = undefined;
+    pressureState = undefined;
+    pendingProviderRewrite = false;
     reconcileAfterCompaction = false;
   });
 
   pi.on("session_compact", async () => {
     telemetry.recordCompaction();
-    emergencyState = undefined;
+    pressureState = undefined;
     reconcileAfterCompaction = true;
   });
 
@@ -144,19 +145,19 @@ export default function (pi: ExtensionAPI) {
 
     const chunk = registry.addCollected(collected);
     telemetry.recordCollected(chunk);
-    const redundant = redundantRetirements(registry, chunk, config);
-    for (const grouped of groupPlanByReason(redundant)) {
-      retirePlan(grouped, true, grouped.candidates[0]?.reason ?? "redundant output");
-    }
   });
 
   pi.on("context", async (event, ctx) => {
     if (!config.enabled) return;
     const startedAt = performance.now();
     const originalMessages = event.messages ?? [];
-    const usage = getUsage(ctx);
+    const reportedUsage = getUsage(ctx);
+    const usage = withProviderEstimateFloor(reportedUsage, originalMessages);
     const preserve = preserveContext(originalMessages, ctx);
     const presentToolCallIds = toolResultIds(originalMessages);
+    const hasUnseenPresentResult = [...presentToolCallIds].some(
+      (toolCallId) => registry.getByToolCallId(toolCallId)?.lastSeenAt == null,
+    );
 
     const absentIds = registry.absentFromContext(presentToolCallIds, reconcileAfterCompaction);
     reconcileAfterCompaction = false;
@@ -164,19 +165,23 @@ export default function (pi: ExtensionAPI) {
       retirePlan(planForIds(registry, absentIds, "compacted out of live context"), true);
     }
 
-    const budget = budgetRetirementPlan(registry, usage, config, { preserve });
-    retirePlan(budget, true, "tool-output budget exceeded");
-
-    if (shouldRunEmergencySweep(usage, config, registry.revision(), emergencyState)) {
-      const emergency = emergencyRetirementPlan(registry, usage, config, { preserve });
-      retirePlan(emergency, true, "emergency response headroom");
-      emergencyState = {
-        registryRevision: registry.revision(),
-        usageTokens: usage?.tokens ?? 0,
-      };
+    if (shouldRunPressureSweep(usage, config, pressureState)) {
+      const pressure = pressureRetirementPlan(registry, usage, config, { preserve });
+      retirePlan(pressure, true, "pressure safety sweep");
+      if (pressure.estimatedSavings >= pressure.targetSavings || !hasUnseenPresentResult) {
+        pressureState = {
+          usageTokens: usage?.tokens ?? 0,
+        };
+      }
+    } else if (
+      usage?.tokens != null &&
+      usage.contextWindow != null &&
+      (usage.tokens / usage.contextWindow) * 100 < config.pressure.triggerPercent
+    ) {
+      pressureState = undefined;
     }
 
-    // A result becomes ordinary budget-eligible only after one provider pass.
+    // A result becomes pressure-eligible only after one provider pass.
     for (const toolCallId of presentToolCallIds) registry.markSeenByToolCallId(toolCallId);
 
     const rewritten = rewriteRetiredExchanges(originalMessages, registry);
@@ -196,11 +201,19 @@ export default function (pi: ExtensionAPI) {
       partialMarkers: rewritten.partialMarkers,
       effectiveTokensSaved,
     });
+    pendingProviderRewrite = modified;
 
     if (ctx?.hasUI) {
       ctx.ui.setStatus("prune-chunks", contextFooter(registry, usage, config));
     }
     if (modified) return { messages: guarded.messages };
+  });
+
+  pi.on("message_end", async (event) => {
+    const providerUsage = assistantProviderUsage(event);
+    if (!providerUsage) return;
+    telemetry.recordProviderResponse(providerUsage, pendingProviderRewrite);
+    pendingProviderRewrite = false;
   });
 
   registerCommands(pi, registry, config, telemetry, retirePlan, persistActions);
@@ -219,7 +232,7 @@ function registerCommands(
   persistActions: (actions: StateDeltaAction[]) => void,
 ): void {
   pi.registerCommand("prune-status", {
-    description: "Show the bounded tool-output working set",
+    description: "Show pressure safety-rail and tracked tool output status",
     async handler(_args, ctx) {
       notify(ctx, renderStatus(registry, getUsage(ctx), config));
     },
@@ -438,7 +451,7 @@ function persistedDelta(
     return undefined;
   }
   const candidate = data as Partial<PersistedStateDelta>;
-  if (candidate.version !== 2 || !Array.isArray(candidate.actions)) return undefined;
+  if (candidate.version !== 3 || !Array.isArray(candidate.actions)) return undefined;
   return candidate as PersistedStateDelta;
 }
 
@@ -456,27 +469,12 @@ function planForIds(registry: ChunkRegistry, ids: string[], reason: string): Ret
     }));
   return {
     cause: "manual",
-    budgetTokens: null,
+    targetTokens: null,
     activeTokens: registry.summary().activeTokens,
     targetSavings: candidates.reduce((sum, item) => sum + item.tokenEstimate, 0),
     estimatedSavings: candidates.reduce((sum, item) => sum + item.tokenEstimate, 0),
     candidates,
   };
-}
-
-function groupPlanByReason(plan: RetirementPlan): RetirementPlan[] {
-  const groups = new Map<string, RetirementPlan["candidates"]>();
-  for (const candidate of plan.candidates) {
-    const candidates = groups.get(candidate.reason) ?? [];
-    candidates.push(candidate);
-    groups.set(candidate.reason, candidates);
-  }
-  return [...groups.values()].map((candidates) => ({
-    ...plan,
-    targetSavings: candidates.reduce((sum, candidate) => sum + candidate.tokenEstimate, 0),
-    estimatedSavings: candidates.reduce((sum, candidate) => sum + candidate.tokenEstimate, 0),
-    candidates,
-  }));
 }
 
 function normalizeContent(content: unknown): ContentBlock[] {
@@ -631,6 +629,59 @@ function estimateProviderTokens(messages: unknown[]): number {
     }
   }
   return Math.ceil(characters / 4);
+}
+
+function withProviderEstimateFloor(
+  usage: ContextUsage | null,
+  messages: unknown[],
+): ContextUsage | null {
+  if (usage?.contextWindow == null) return usage;
+  const tokens = Math.max(usage.tokens ?? 0, estimateProviderTokens(messages));
+  return {
+    tokens,
+    contextWindow: usage.contextWindow,
+    percent: (tokens / usage.contextWindow) * 100,
+  };
+}
+
+type ProviderUsage = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+};
+
+function assistantProviderUsage(event: unknown): ProviderUsage | undefined {
+  const candidate = event as {
+    message?: {
+      role?: unknown;
+      usage?: {
+        input?: unknown;
+        output?: unknown;
+        cacheRead?: unknown;
+        cacheWrite?: unknown;
+        cost?: { total?: unknown } | unknown;
+      };
+    };
+  };
+  if (candidate.message?.role !== "assistant" || !candidate.message.usage) return undefined;
+  const usage = candidate.message.usage;
+  const cost =
+    usage.cost && typeof usage.cost === "object"
+      ? numberValue((usage.cost as { total?: unknown }).total)
+      : numberValue(usage.cost);
+  return {
+    input: numberValue(usage.input),
+    output: numberValue(usage.output),
+    cacheRead: numberValue(usage.cacheRead),
+    cacheWrite: numberValue(usage.cacheWrite),
+    cost,
+  };
+}
+
+function numberValue(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function safeJsonLength(value: unknown): number {

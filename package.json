@@ -1,7 +1,7 @@
 {
   "name": "pi-prune-chunks",
-  "version": "0.2.0",
-  "description": "Invisible bounded working-set hygiene for bulky Pi tool output",
+  "version": "0.3.0",
+  "description": "Cache-aware pressure safety rail for bulky Pi tool output",
   "main": "index.ts",
   "files": [
     "index.ts",

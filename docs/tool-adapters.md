@@ -6,20 +6,21 @@ Tracking is deliberately generic. Known names improve classification, while
 ## Reads and searches
 
 Paths and line ranges are inferred from structured arguments first, then safe
-command/text patterns. Only complete newer range coverage retires an older read.
-Searches are low risk unless their content carries a current failure signal.
+command/text patterns. Searches are low risk unless their content carries a
+current failure signal. Classification affects pressure eligibility only; it
+does not cause immediate retirement.
 
 ## Shell, tests, and diffs
 
 Read-only bounded shell output may be low risk. Current test failures are high
 risk; successful test logs may become eligible after recency protection. Diffs
-are always excluded from automatic budget retirement.
+are always excluded from automatic pressure retirement.
 
 ## ReamerX and flow tools
 
-Repo maps, searches, symbols, traces, paths, impacts, and context tools are
-exploratory. Edit packs, slices, and changes are terminal results. A terminal
-result can supersede exploratory output only within the same recorded scope.
+Repo maps, searches, symbols, traces, paths, impacts, and context tools retain
+their classification and scope metadata. Terminal output does not immediately
+supersede exploratory output.
 
 ## Subagents
 

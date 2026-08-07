@@ -1,16 +1,15 @@
 # Architecture
 
-v0.2 is a provider-copy hygiene layer, not an agent workflow and not a
+v0.3 is a provider-copy pressure safety rail, not an agent workflow and not a
 replacement for Pi compaction.
 
 ## Data flow
 
 1. `tool_result` classifies sufficiently large output and records compact
    metadata plus exact content in session memory.
-2. Provable redundancy can retire a result immediately. Unique output is merely
-   tracked.
-3. The `context` hook reconciles results removed by Pi compaction, enforces the
-   bounded tool-output budget, and evaluates the one-shot emergency safeguard.
+2. Results are tracked without changing provider context.
+3. The `context` hook reconciles results removed by Pi compaction and evaluates
+   the 90%-to-80% pressure gate. Below pressure, no automatic retirement runs.
 4. Full retired exchanges are removed as a validated tool-call/result pair from
    the provider copy. A bulk child can instead be replaced by a neutral partial
    marker.
@@ -23,7 +22,7 @@ adds management prompt content and never calls `ctx.compact()`.
 
 Chunk IDs are stable hashes of the tool-call ID, tool name, and exact result.
 The registry is rebuilt from saved transcript messages on resume. Small v2
-custom entries contain only state transitions (`active` or `pruned`) and are
+custom v3 entries contain only state transitions (`active` or `pruned`) and are
 replayed afterward. Full registries, audit logs, telemetry snapshots, and raw
 output are not appended to the transcript.
 
@@ -41,7 +40,10 @@ crossed.
 
 ## Telemetry and UI
 
-Telemetry is aggregate and memory-only. It records effective provider-token
-savings, retirement cause, rewrite time, archive time, restores, fallback
-markers, and Pi compactions. No raw output is included. Normal passes generate
-no notification; a single compact status line reports the working-set budget.
+Telemetry is aggregate and memory-only. It records provider-reported input,
+output, cache reads/writes, and cost from assistant `message_end` events, along
+with rewrite attribution, retirement cause, hook time, archive time, restores,
+fallback markers, and Pi compactions. The report explicitly treats these as
+observations, not counterfactual savings. No raw output is included. Normal
+passes generate no notification; a compact status line reports the pressure
+threshold and tracked output.

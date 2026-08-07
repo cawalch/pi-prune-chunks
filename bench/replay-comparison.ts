@@ -2,7 +2,7 @@
 
 import { collectToolResult } from "../src/collector";
 import { mergeConfig } from "../src/config";
-import { budgetRetirementPlan } from "../src/pruner";
+import { pressureRetirementPlan, shouldRunPressureSweep } from "../src/pruner";
 import { ChunkRegistry } from "../src/registry";
 import { rewriteRetiredExchanges } from "../src/tombstones";
 import type { ContentBlock } from "../src/types";
@@ -15,9 +15,10 @@ type Message = {
 
 const cfg = mergeConfig({
   track: { minChunkTokens: 1 },
-  budget: {
-    minTokens: 1_200,
-    maxTokens: 1_200,
+  pressure: {
+    triggerPercent: 90,
+    targetPercent: 80,
+    retryAfterGrowthTokens: 1_000,
     preserveRecentResults: 6,
     preserveRecentMinutes: 0,
   },
@@ -84,32 +85,28 @@ messages.push({
   content: [{ type: "text", text: failureOutput }],
 });
 
-const v2Plan = budgetRetirementPlan(
-  registry,
-  { tokens: 22_400, contextWindow: 32_000, percent: 70 },
-  cfg,
-);
-registry.prune(v2Plan.candidates.map((candidate) => candidate.id), "budget", "auto_pruned");
-const v2 = rewriteRetiredExchanges(messages, registry).messages;
+const belowPressureUsage = { tokens: 8_900, contextWindow: 10_000, percent: 89 };
+if (shouldRunPressureSweep(belowPressureUsage, cfg)) {
+  throw new Error("v0.3 unexpectedly triggered below its pressure threshold");
+}
+const belowPressure = messages;
 
-const legacyIds = new Set(
-  messages
-    .filter((message) => message.role === "toolResult")
-    .slice(0, 10)
-    .map((message) => message.toolCallId as string),
+const pressureUsage = { tokens: 9_200, contextWindow: 10_000, percent: 92 };
+if (!shouldRunPressureSweep(pressureUsage, cfg)) {
+  throw new Error("v0.3 failed to trigger at pressure");
+}
+const pressurePlan = pressureRetirementPlan(registry, pressureUsage, cfg);
+registry.prune(
+  pressurePlan.candidates.map((candidate) => candidate.id),
+  "pressure safety sweep",
+  "auto_pruned",
 );
-const v1 = messages.map((message) => {
-  if (message.role !== "toolResult" || !message.toolCallId || !legacyIds.has(message.toolCallId)) {
-    return message;
-  }
-  const firstLine = String(message.content[0]?.text ?? "").split("\n")[0];
-  return { ...message, content: [{ type: "text", text: `[pruned ${firstLine}; restore_chunks available]` }] };
-});
+const pressureSweep = rewriteRetiredExchanges(messages, registry).messages;
 
 const rows = [
   summarize("no cleanup", messages),
-  summarize("v0.1 pressure/tombstones", v1),
-  summarize("v0.2 bounded working set", v2),
+  summarize("v0.3 below pressure", belowPressure),
+  summarize("v0.3 pressure safety sweep", pressureSweep),
 ];
 
 console.log("Replay comparison (facts are counted only when present in provider context)");
@@ -119,9 +116,15 @@ for (const row of rows) {
   );
 }
 
-const v2Row = rows[2];
-if (!v2Row.paired || v2Row.critical !== criticalFacts.length) {
-  throw new Error("v0.2 lost a critical retained fact or produced an orphaned tool result");
+if (JSON.stringify(messages) !== JSON.stringify(belowPressure)) {
+  throw new Error("v0.3 changed provider context below pressure");
+}
+if (rows[0].tokens !== rows[1].tokens || rows[0].facts !== rows[1].facts) {
+  throw new Error("v0.3 below-pressure replay is not identical to no cleanup");
+}
+const pressureRow = rows[2];
+if (!pressureRow.paired || pressureRow.critical !== criticalFacts.length) {
+  throw new Error("v0.3 pressure sweep lost a protected fact or produced an orphaned result");
 }
 
 function summarize(name: string, providerMessages: Message[]) {

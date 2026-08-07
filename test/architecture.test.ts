@@ -8,13 +8,7 @@ import { collectToolResult } from "../src/collector";
 import { mergeConfig } from "../src/config";
 import { compactFailedToolValidationMessages } from "../src/contextGuards";
 import { DiskChunkContentCache } from "../src/diskCache";
-import {
-  activeToolBudget,
-  budgetRetirementPlan,
-  emergencyRetirementPlan,
-  redundantRetirements,
-  shouldRunEmergencySweep,
-} from "../src/pruner";
+import { pressureRetirementPlan, shouldRunPressureSweep } from "../src/pruner";
 import { ChunkRegistry } from "../src/registry";
 import { restoreChunks } from "../src/restorer";
 import { rewriteRetiredExchanges } from "../src/tombstones";
@@ -80,156 +74,59 @@ function result(id: string, text = "result") {
   return { role: "toolResult", toolCallId: id, toolName: "rg", content: textBlock(text) };
 }
 
-describe("v0.2 configuration", () => {
-  test("derives a bounded working-set budget across model windows", () => {
+describe("v0.3 configuration", () => {
+  test("defaults to a 90%-to-80% pressure safety sweep", () => {
     const cfg = config();
-    assert.equal(activeToolBudget(32_000, cfg), 8_192);
-    assert.equal(activeToolBudget(64_000, cfg), 16_000);
-    assert.equal(activeToolBudget(200_000, cfg), 50_000);
-    assert.equal(activeToolBudget(1_000_000, cfg), 65_536);
-    assert.equal(activeToolBudget(undefined, cfg), 65_536);
+    assert.deepEqual(cfg.pressure, {
+      triggerPercent: 90,
+      targetPercent: 80,
+      retryAfterGrowthTokens: 8_192,
+      preserveRecentResults: 6,
+      preserveRecentMinutes: 3,
+    });
   });
 
-  test("uses the requested response-headroom thresholds", () => {
+  test("requires crossing the percentage trigger", () => {
     const cfg = config();
     for (const window of [32_000, 64_000, 200_000, 1_000_000]) {
-      const ceiling = window - 8_192;
-      assert.equal(shouldRunEmergencySweep(usage(ceiling, window), cfg, 1), false);
-      assert.equal(shouldRunEmergencySweep(usage(ceiling + 1, window), cfg, 1), true);
+      assert.equal(shouldRunPressureSweep(usage(window * 0.9 - 1, window), cfg), false);
+      assert.equal(shouldRunPressureSweep(usage(window * 0.9, window), cfg), true);
     }
   });
 
-  test("rejects every legacy management-policy setting with a migration error", () => {
-    for (const key of ["profile", "autoPrune", "decisionCards", "tombstones", "reamerx"]) {
+  test("rejects v0.1 and v0.2 policy settings with a migration error", () => {
+    for (const key of [
+      "profile",
+      "autoPrune",
+      "decisionCards",
+      "tombstones",
+      "reamerx",
+      "budget",
+      "emergency",
+      "redundancy",
+    ]) {
       assert.throws(
         () => mergeConfig({ [key]: {} }),
-        /v0\.2 no longer supports.*Migrate to budget, emergency, redundancy, and restore/,
+        /v0\.3 no longer supports.*configure pressure and restore/,
       );
     }
   });
-});
 
-describe("provable redundancy", () => {
-  test("retires exact duplicates but not merely matching commands", () => {
-    const cfg = config();
-    const registry = new ChunkRegistry();
-    const first = addChunk(registry, cfg, "first", "exec_command", "src/a.ts:1:first hit", {
-      command: "rg value src",
-    });
-    const duplicate = addChunk(registry, cfg, "duplicate", "exec_command", "src/a.ts:1:first hit", {
-      command: "rg value src",
-    });
-    const duplicatePlan = redundantRetirements(registry, duplicate, cfg);
-    assert.deepEqual(
-      duplicatePlan.candidates.map((item) => item.id),
-      [first.id],
-    );
-
-    const unique = addChunk(registry, cfg, "unique", "exec_command", "src/b.ts:9:different hit", {
-      command: "rg value src",
-    });
-    const uniquePlan = redundantRetirements(registry, unique, cfg);
-    assert.equal(
-      uniquePlan.candidates.some((item) => item.id === duplicate.id),
-      false,
-    );
-  });
-
-  test("retires zero-result searches immediately", () => {
-    const cfg = config();
-    const registry = new ChunkRegistry();
-    const zero = addChunk(registry, cfg, "zero", "rg", "No matches found");
-    const plan = redundantRetirements(registry, zero, cfg);
-    assert.deepEqual(
-      plan.candidates.map((item) => item.id),
-      [zero.id],
-    );
-  });
-
-  test("requires full file-range coverage, not partial overlap", () => {
-    const cfg = config();
-    const registry = new ChunkRegistry();
-    const old = addChunk(registry, cfg, "old", "read", "old bounded read", {
-      path: "src/a.ts",
-      startLine: 20,
-      endLine: 40,
-    });
-    const partial = addChunk(registry, cfg, "partial", "read", "different partial read", {
-      path: "src/a.ts",
-      startLine: 30,
-      endLine: 50,
-    });
-    assert.equal(
-      redundantRetirements(registry, partial, cfg).candidates.some((item) => item.id === old.id),
-      false,
-    );
-    const covering = addChunk(registry, cfg, "covering", "read", "different covering read", {
-      path: "src/a.ts",
-      startLine: 1,
-      endLine: 100,
-    });
-    assert.equal(
-      redundantRetirements(registry, covering, cfg).candidates.some((item) => item.id === old.id),
-      true,
-    );
-    const failedCovering = addChunk(
-      registry,
-      cfg,
-      "failed-covering",
-      "read",
-      "Error: source read failed",
-      { path: "src/a.ts", startLine: 1, endLine: 200 },
-    );
-    assert.equal(
-      redundantRetirements(registry, failedCovering, cfg).candidates.some(
-        (item) => item.id === old.id,
-      ),
-      false,
-    );
-  });
-
-  test("terminal Reamer output supersedes exploratory output in the same scope", () => {
-    const cfg = config();
-    const registry = new ChunkRegistry();
-    const exploratory = addChunk(registry, cfg, "trace", "reamerx_trace", "call graph\nA -> B");
-    const terminal = addChunk(registry, cfg, "pack", "reamerx_edit_pack", "patch-ready bundle");
-    const plan = redundantRetirements(registry, terminal, cfg);
-    assert.equal(
-      plan.candidates.some((item) => item.id === exploratory.id),
-      true,
-    );
-  });
-
-  test("same-file diffs are never treated as supersession proof", () => {
-    const cfg = config();
-    const registry = new ChunkRegistry();
-    const first = addChunk(
-      registry,
-      cfg,
-      "diff-a",
-      "git_diff",
-      "diff --git a/src/a.ts b/src/a.ts\n-old\n+one",
-    );
-    const second = addChunk(
-      registry,
-      cfg,
-      "diff-b",
-      "git_diff",
-      "diff --git a/src/a.ts b/src/a.ts\n-one\n+two",
-    );
-    assert.equal(
-      redundantRetirements(registry, second, cfg).candidates.some((item) => item.id === first.id),
-      false,
+  test("validates pressure percentages", () => {
+    assert.throws(
+      () => mergeConfig({ pressure: { triggerPercent: 80, targetPercent: 80 } }),
+      /0 < targetPercent < triggerPercent <= 100/,
     );
   });
 });
 
-describe("budget and emergency policy", () => {
-  test("unique low-risk output must be shown once before budget retirement", () => {
+describe("pressure-only policy", () => {
+  test("unique low-risk output must be shown once before pressure retirement", () => {
     const cfg = config({
-      budget: {
-        minTokens: 100,
-        maxTokens: 100,
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 100,
         preserveRecentResults: 0,
         preserveRecentMinutes: 0,
       },
@@ -244,23 +141,31 @@ describe("budget and emergency policy", () => {
     });
     assert.ok(collected);
     registry.addCollected(collected, Date.now() - 60_000);
-    assert.ok(registry.summary().activeTokens > 100);
-    assert.equal(budgetRetirementPlan(registry, usage(700, 1_000), cfg).candidates.length, 0);
+    assert.equal(pressureRetirementPlan(registry, usage(900, 1_000), cfg).candidates.length, 0);
     registry.markSeenByToolCallId("new");
-    assert.ok(budgetRetirementPlan(registry, usage(700, 1_000), cfg).candidates.length > 0);
+    assert.ok(pressureRetirementPlan(registry, usage(900, 1_000), cfg).candidates.length > 0);
   });
 
   test("preserves newest results, young results, failures, diffs, anchors, and active paths", () => {
     const cfg = config({
-      budget: {
-        minTokens: 1,
-        maxTokens: 1,
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 100,
         preserveRecentResults: 2,
         preserveRecentMinutes: 3,
       },
     });
     const registry = new ChunkRegistry();
-    const oldSafe = addChunk(registry, cfg, "safe", "rg", "src/safe.ts:1: safe hit");
+    const oldSafe = addChunk(
+      registry,
+      cfg,
+      "safe",
+      "rg",
+      "src/safe.ts:1: safe hit",
+      undefined,
+      Date.now() - 20 * 60_000,
+    );
     const pathChunk = addChunk(registry, cfg, "path", "read", "bounded active path", {
       path: "src/active.ts",
       startLine: 1,
@@ -298,7 +203,7 @@ describe("budget and emergency policy", () => {
       Date.now() - 30_000,
     );
     const newest = addChunk(registry, cfg, "newest", "rg", "src/newest.ts:1: newest hit");
-    const plan = budgetRetirementPlan(registry, usage(900, 1_000), cfg, {
+    const plan = pressureRetirementPlan(registry, usage(900, 1_000), cfg, {
       preserve: {
         paths: new Set(["src/active.ts"]),
         anchors: new Set(["#918"]),
@@ -309,7 +214,7 @@ describe("budget and emergency policy", () => {
     for (const protectedChunk of [pathChunk, anchorChunk, diff, failure, young, newest]) {
       assert.equal(ids.has(protectedChunk.id), false, protectedChunk.label);
     }
-    const lateAnchorPlan = budgetRetirementPlan(registry, usage(900, 1_000), cfg, {
+    const lateAnchorPlan = pressureRetirementPlan(registry, usage(900, 1_000), cfg, {
       preserve: { anchors: new Set(["#919"]) },
     });
     assert.equal(
@@ -320,9 +225,10 @@ describe("budget and emergency policy", () => {
 
   test("restored output receives the same time-based grace", async () => {
     const cfg = config({
-      budget: {
-        minTokens: 1,
-        maxTokens: 1,
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 100,
         preserveRecentResults: 0,
         preserveRecentMinutes: 3,
       },
@@ -332,14 +238,15 @@ describe("budget and emergency policy", () => {
     registry.prune([chunk.id]);
     const restored = await restoreChunks(registry, [chunk.id], cfg);
     assert.equal(restored[0].status, "restored");
-    assert.equal(budgetRetirementPlan(registry, usage(900, 1_000), cfg).candidates.length, 0);
+    assert.equal(pressureRetirementPlan(registry, usage(900, 1_000), cfg).candidates.length, 0);
   });
 
   test("partially trims an old oversized result with a neutral marker", () => {
     const cfg = config({
-      budget: {
-        minTokens: 100,
-        maxTokens: 100,
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 100,
         preserveRecentResults: 0,
         preserveRecentMinutes: 0,
       },
@@ -350,12 +257,12 @@ describe("budget and emergency policy", () => {
       (_, index) => `src/a.ts:${index + 1}: hit ${"x".repeat(12)}`,
     ).join("\n");
     const parent = addChunk(registry, cfg, "large", "rg", largeText);
-    const plan = budgetRetirementPlan(registry, usage(900, 1_000), cfg);
+    const plan = pressureRetirementPlan(registry, usage(900, 1_000), cfg);
     assert.equal(plan.candidates.length, 1);
     assert.equal(plan.candidates[0].id, `${parent.id}#bulk`);
     registry.prune(
       plan.candidates.map((item) => item.id),
-      "budget",
+      "pressure",
       "auto_pruned",
     );
     const rewritten = rewriteRetiredExchanges(
@@ -367,11 +274,12 @@ describe("budget and emergency policy", () => {
     assert.equal(registry.get(parent.id)?.pruned, false);
   });
 
-  test("runs the emergency sweep once until content changes or usage grows by 2,048", () => {
+  test("retries only after configured context growth, not registry changes", () => {
     const cfg = config({
-      budget: {
-        minTokens: 1,
-        maxTokens: 1,
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 2_048,
         preserveRecentResults: 0,
         preserveRecentMinutes: 0,
       },
@@ -379,18 +287,13 @@ describe("budget and emergency policy", () => {
     const registry = new ChunkRegistry();
     addChunk(registry, cfg, "old", "rg", "src/a.ts:1: hit\n".repeat(400));
     const high = usage(92_000, 100_000);
-    assert.equal(shouldRunEmergencySweep(high, cfg, registry.revision()), true);
-    assert.ok(emergencyRetirementPlan(registry, high, cfg).candidates.length > 0);
-    const previous = { registryRevision: registry.revision(), usageTokens: high.tokens ?? 0 };
-    assert.equal(
-      shouldRunEmergencySweep(usage(93_000, 100_000), cfg, registry.revision(), previous),
-      false,
-    );
-    assert.equal(
-      shouldRunEmergencySweep(usage(94_048, 100_000), cfg, registry.revision(), previous),
-      true,
-    );
-    assert.equal(shouldRunEmergencySweep(high, cfg, registry.revision() + 1, previous), true);
+    assert.equal(shouldRunPressureSweep(high, cfg), true);
+    assert.ok(pressureRetirementPlan(registry, high, cfg).candidates.length > 0);
+    const previous = { usageTokens: high.tokens ?? 0 };
+    assert.equal(shouldRunPressureSweep(usage(93_000, 100_000), cfg, previous), false);
+    assert.equal(shouldRunPressureSweep(usage(94_048, 100_000), cfg, previous), true);
+    addChunk(registry, cfg, "new", "rg", "src/new.ts:1: hit");
+    assert.equal(shouldRunPressureSweep(high, cfg, previous), false);
   });
 });
 
@@ -525,35 +428,36 @@ describe("extension integration", () => {
     assert.equal(app.entries.length, 0);
   });
 
-  test("1,000 unchanged hooks at 70% produce no pruning, entries, notifications, or compact calls", async () => {
+  test("1,000 unchanged hooks at 89% leave an old-budget-sized result byte-identical", async () => {
     const app = createHarness();
+    const output = "src/a.ts:1: stable unique hit\n".repeat(1_600);
     await app.handlers.tool_result?.(
       {
         toolCallId: "stable",
         toolName: "rg",
-        content: textBlock("src/a.ts:1: stable hit\n".repeat(50)),
+        content: textBlock(output),
       },
       {},
     );
-    const messages = [
-      assistant([{ id: "stable" }]),
-      result("stable", "src/a.ts:1: stable hit\n".repeat(50)),
-    ];
-    const ctx = app.context(22_400, 32_000);
+    const messages = [assistant([{ id: "stable" }]), result("stable", output)];
+    const snapshot = structuredClone(messages);
+    const ctx = app.context(28_480, 32_000);
     for (let index = 0; index < 1_000; index++) {
       const transformed = await app.handlers.context?.({ messages }, ctx);
       assert.equal(transformed, undefined);
     }
+    assert.deepEqual(messages, snapshot);
     assert.equal(app.entries.length, 0);
     assert.equal(app.notifications.length, 0);
     assert.equal(app.compactCalls, 0);
   });
 
-  test("budget cleanup waits one provider pass, then removes the full pair", async () => {
+  test("pressure cleanup waits one provider pass, then removes the full pair", async () => {
     const app = createHarness({
-      budget: {
-        minTokens: 100,
-        maxTokens: 100,
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 100,
         preserveRecentResults: 0,
         preserveRecentMinutes: 0,
       },
@@ -564,7 +468,7 @@ describe("extension integration", () => {
       {},
     );
     const messages = [assistant([{ id: "large" }]), result("large", output)];
-    const ctx = app.context(700, 1_000);
+    const ctx = app.context(900, 1_000);
     assert.equal(await app.handlers.context?.({ messages }, ctx), undefined);
     const transformed = await app.handlers.context?.({ messages }, ctx);
     assert.deepEqual(transformed?.messages, []);
@@ -572,18 +476,48 @@ describe("extension integration", () => {
     assert.equal(app.notifications.length, 0);
   });
 
-  test("a zero-result search is retired on ingestion without an agent turn", async () => {
+  test("zero-result and duplicate searches remain visible below pressure", async () => {
     const app = createHarness();
+    for (const id of ["zero", "duplicate"]) {
+      await app.handlers.tool_result?.(
+        { toolCallId: id, toolName: "rg", content: textBlock("No matches found") },
+        {},
+      );
+    }
+    const messages = [
+      assistant([{ id: "zero" }]),
+      result("zero", "No matches found"),
+      assistant([{ id: "duplicate" }]),
+      result("duplicate", "No matches found"),
+    ];
+    const transformed = await app.handlers.context?.({ messages }, app.context(1_000, 32_000));
+    assert.equal(transformed, undefined);
+    assert.deepEqual(messages[1], result("zero", "No matches found"));
+    assert.equal(app.tools.length, 0);
+    assert.equal(app.entries.length, 0);
+  });
+
+  test("uses provider-message size as a conservative pressure floor", async () => {
+    const app = createHarness({
+      pressure: {
+        triggerPercent: 90,
+        targetPercent: 80,
+        retryAfterGrowthTokens: 100,
+        preserveRecentResults: 0,
+        preserveRecentMinutes: 0,
+      },
+    });
+    const output = "src/estimated.ts:1: hit\n".repeat(500);
     await app.handlers.tool_result?.(
-      { toolCallId: "zero", toolName: "rg", content: textBlock("No matches found") },
+      { toolCallId: "estimated", toolName: "rg", content: textBlock(output) },
       {},
     );
-    const transformed = await app.handlers.context?.(
-      { messages: [assistant([{ id: "zero" }]), result("zero", "No matches found")] },
-      app.context(1_000, 32_000),
-    );
-    assert.deepEqual(transformed?.messages, []);
-    assert.equal(app.tools.length, 0);
+    const messages = [assistant([{ id: "estimated" }]), result("estimated", output)];
+    const staleUsage = app.context(100, 1_000);
+    assert.equal(await app.handlers.context?.({ messages }, staleUsage), undefined);
+    const transformed = await app.handlers.context?.({ messages }, staleUsage);
+    assert.ok(transformed);
+    assert.match(textFrom(transformed.messages[1].content), /older bulk output retired/);
     assert.equal(app.entries.length, 1);
   });
 
@@ -669,8 +603,55 @@ describe("extension integration", () => {
     assert.equal(resumed.entries.length, 0);
   });
 
+  test("ignores v0.2 retirement deltas so an upgrade restores the raw transcript", async () => {
+    const messagesOnly = [
+      {
+        type: "message",
+        timestamp: new Date(Date.now() - 1_000).toISOString(),
+        message: assistant([{ id: "old-state", name: "rg" }]),
+      },
+      {
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: result("old-state", "src/a.ts:1: visible again"),
+      },
+    ];
+    const probe = createHarness();
+    await probe.handlers.session_start?.(
+      {},
+      { sessionManager: { getEntries: () => messagesOnly } },
+    );
+    await probe.commands.get("prune-largest")?.handler("", probe.context(1_000, 32_000));
+    const actualId = /pc_[0-9a-f]{12}/.exec(probe.notifications.at(-1) ?? "")?.[0];
+    assert.ok(actualId);
+    const transcript = [
+      ...messagesOnly,
+      {
+        type: "custom",
+        customType: "prune-chunks-state-v2",
+        data: {
+          version: 2,
+          actions: [{ id: actualId, state: "pruned", timestamp: Date.now() }],
+        },
+      },
+    ];
+    const resumed = createHarness();
+    await resumed.handlers.session_start?.(
+      {},
+      { sessionManager: { getEntries: () => transcript } },
+    );
+    const messages = [
+      assistant([{ id: "old-state" }]),
+      result("old-state", "src/a.ts:1: visible again"),
+    ];
+    assert.equal(
+      await resumed.handlers.context?.({ messages }, resumed.context(1_000, 32_000)),
+      undefined,
+    );
+  });
+
   test("observes Pi compaction but never invokes it", async () => {
-    const directory = await mkdtemp(path.join(tmpdir(), "pi-prune-v2-report-"));
+    const directory = await mkdtemp(path.join(tmpdir(), "pi-prune-v3-report-"));
     try {
       const app = createHarness();
       await app.handlers.session_compact?.({}, app.context(1_000, 32_000));
@@ -680,6 +661,62 @@ describe("extension integration", () => {
       const report = await readFile(path.join(directory, "hygiene.md"), "utf8");
       assert.match(report, /Pi compactions observed: 1/);
       assert.equal(app.compactCalls, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("reports actual provider tokens, cache usage, cost, and rewritten responses", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "pi-prune-v3-provider-report-"));
+    try {
+      const app = createHarness();
+      await app.handlers.context?.({ messages: [] }, app.context(1_000, 32_000));
+      await app.handlers.message_end?.(
+        {
+          message: {
+            role: "assistant",
+            usage: {
+              input: 120,
+              output: 30,
+              cacheRead: 880,
+              cacheWrite: 10,
+              cost: { total: 0.012345 },
+            },
+          },
+        },
+        {},
+      );
+      const validation = `Validation failed for tool "edit"\n- required: path\nReceived arguments:\n${"x".repeat(2_000)}`;
+      await app.handlers.context?.(
+        { messages: [{ role: "toolResult", content: textBlock(validation) }] },
+        app.context(2_000, 32_000),
+      );
+      await app.handlers.message_end?.(
+        {
+          message: {
+            role: "assistant",
+            usage: {
+              input: 900,
+              output: 50,
+              cacheRead: 100,
+              cacheWrite: 0,
+              cost: { total: 0.02 },
+            },
+          },
+        },
+        {},
+      );
+      await app.commands
+        .get("prune-report")
+        ?.handler("--output provider.md", { ...app.context(2_000, 32_000), cwd: directory });
+      const report = await readFile(path.join(directory, "provider.md"), "utf8");
+      assert.match(report, /Responses observed: 2/);
+      assert.match(report, /Provider input\/output: 1020\/80 tokens/);
+      assert.match(report, /Cache read\/write: 980\/10 tokens/);
+      assert.match(report, /Cache-read share: 49\.00%/);
+      assert.match(report, /Reported cost: \$0\.032345/);
+      assert.match(report, /Rewritten responses: 1; input 900; cache read 100 \(10\.00%\)/);
+      assert.match(report, /provider-reported observations, not a counterfactual/);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
@@ -723,7 +760,7 @@ describe("context guards and preservation", () => {
     assert.doesNotMatch(output, /restore_chunks|prune_chunks/);
   });
 
-  test("extracts active paths, anchors, and stable v0.2 chunk ids", () => {
+  test("extracts active paths, anchors, and stable chunk ids", () => {
     const preserve = preserveContext(
       [
         { role: "user", content: textBlock("Fix src/a.ts for issue #918") },

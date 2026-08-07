@@ -1,5 +1,5 @@
 import type { RetirementCandidate } from "./pruner";
-import { activeToolBudget, contextPercent } from "./pruner";
+import { contextPercent } from "./pruner";
 import type { ChunkRegistry } from "./registry";
 import type { ChunkActionResult, ChunkListOutput, ContextUsage, PruneChunksConfig } from "./types";
 
@@ -62,7 +62,6 @@ export function renderStatus(
   config: PruneChunksConfig,
 ): string {
   const summary = registry.summary();
-  const budget = activeToolBudget(usage?.contextWindow, config);
   const percent = contextPercent(usage);
   const provider =
     usage?.tokens != null && usage.contextWindow
@@ -70,10 +69,10 @@ export function renderStatus(
       : "unknown";
   return [
     `Provider context: ${provider}`,
-    `Tool-output working set: ~${summary.activeTokens}/${budget} tokens`,
+    `Tracked active tool output: ~${summary.activeTokens} tokens`,
     `Tracked: ${summary.totalChunks}; retired: ${summary.prunedChunks} (~${summary.prunedTokens}t)`,
-    `Budget: clamp(window × ${config.budget.windowFraction}, ${config.budget.minTokens}, ${config.budget.maxTokens})`,
-    `Emergency headroom: ${config.emergency.minResponseHeadroomTokens} tokens; Pi owns compaction`,
+    `Automatic safety sweep: trigger ${config.pressure.triggerPercent}%, target ${config.pressure.targetPercent}%`,
+    `No fixed working-set budget; below-trigger output is left untouched; Pi owns compaction`,
   ].join("\n");
 }
 
@@ -83,9 +82,8 @@ export function contextFooter(
   config: PruneChunksConfig,
 ): string {
   const summary = registry.summary();
-  const budget = activeToolBudget(usage?.contextWindow, config);
   const percent = contextPercent(usage);
-  return `[Context: ${percent == null ? "?" : Math.round(percent)}% | tool output: ~${summary.activeTokens}/${budget}t | retired: ${summary.prunedChunks}]`;
+  return `[Context: ${percent == null ? "?" : Math.round(percent)}% | pressure: ${config.pressure.triggerPercent}% | tool output: ~${summary.activeTokens}t | retired: ${summary.prunedChunks}]`;
 }
 
 function labelWithScope(chunk: ChunkListOutput["chunks"][number]): string {

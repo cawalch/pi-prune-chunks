@@ -35,6 +35,24 @@ export type HygieneMetrics = {
   rewriteDurationMs: number;
   archiveDurationMs: number;
   compactions: number;
+  providerResponses: number;
+  rewrittenProviderResponses: number;
+  providerInputTokens: number;
+  providerOutputTokens: number;
+  providerCacheReadTokens: number;
+  providerCacheWriteTokens: number;
+  providerCost: number;
+  rewrittenProviderInputTokens: number;
+  rewrittenProviderCacheReadTokens: number;
+  rewrittenProviderCost: number;
+};
+
+export type ProviderResponseUsage = {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
 };
 
 export type TelemetrySnapshot = {
@@ -104,6 +122,20 @@ export class TelemetryRecorder {
     this.metrics.compactions += 1;
   }
 
+  recordProviderResponse(usage: ProviderResponseUsage, rewritten: boolean): void {
+    this.metrics.providerResponses += 1;
+    this.metrics.providerInputTokens += usage.input;
+    this.metrics.providerOutputTokens += usage.output;
+    this.metrics.providerCacheReadTokens += usage.cacheRead;
+    this.metrics.providerCacheWriteTokens += usage.cacheWrite;
+    this.metrics.providerCost += usage.cost;
+    if (!rewritten) return;
+    this.metrics.rewrittenProviderResponses += 1;
+    this.metrics.rewrittenProviderInputTokens += usage.input;
+    this.metrics.rewrittenProviderCacheReadTokens += usage.cacheRead;
+    this.metrics.rewrittenProviderCost += usage.cost;
+  }
+
   snapshot(
     summary: ChunkSummary,
     usage?: ContextUsage | null,
@@ -129,8 +161,17 @@ export function renderTelemetryReport(snapshot: TelemetrySnapshot): string {
     snapshot.metrics.contextPasses === 0
       ? 0
       : snapshot.metrics.rewriteDurationMs / snapshot.metrics.contextPasses;
+  const cacheShare = ratio(
+    snapshot.metrics.providerCacheReadTokens,
+    snapshot.metrics.providerInputTokens + snapshot.metrics.providerCacheReadTokens,
+  );
+  const rewrittenCacheShare = ratio(
+    snapshot.metrics.rewrittenProviderCacheReadTokens,
+    snapshot.metrics.rewrittenProviderInputTokens +
+      snapshot.metrics.rewrittenProviderCacheReadTokens,
+  );
   return [
-    "# Prune Chunks v0.2 Hygiene Report",
+    "# Prune Chunks v0.3 Pressure Safety-Rail Report",
     "",
     `Generated: ${new Date(snapshot.generatedAt).toISOString()}`,
     `Provider context: ${usageText}`,
@@ -154,6 +195,17 @@ export function renderTelemetryReport(snapshot: TelemetrySnapshot): string {
     `- Context rewrites: ${snapshot.metrics.rewrittenPasses}/${snapshot.metrics.contextPasses}; average hook ${averageRewrite.toFixed(2)}ms`,
     `- Archive time: ${snapshot.metrics.archiveDurationMs.toFixed(2)}ms`,
     `- Pi compactions observed: ${snapshot.metrics.compactions}`,
+    "",
+    "## Actual provider usage",
+    "",
+    `- Responses observed: ${snapshot.metrics.providerResponses}`,
+    `- Provider input/output: ${snapshot.metrics.providerInputTokens}/${snapshot.metrics.providerOutputTokens} tokens`,
+    `- Cache read/write: ${snapshot.metrics.providerCacheReadTokens}/${snapshot.metrics.providerCacheWriteTokens} tokens`,
+    `- Cache-read share: ${cacheShare}`,
+    `- Reported cost: $${snapshot.metrics.providerCost.toFixed(6)}`,
+    `- Rewritten responses: ${snapshot.metrics.rewrittenProviderResponses}; input ${snapshot.metrics.rewrittenProviderInputTokens}; cache read ${snapshot.metrics.rewrittenProviderCacheReadTokens} (${rewrittenCacheShare}); cost $${snapshot.metrics.rewrittenProviderCost.toFixed(6)}`,
+    "",
+    "These are provider-reported observations, not a counterfactual claim about tokens or cost saved.",
     "",
     "Raw tool output is not included in telemetry.",
   ].join("\n");
@@ -181,6 +233,16 @@ function emptyMetrics(): HygieneMetrics {
     rewriteDurationMs: 0,
     archiveDurationMs: 0,
     compactions: 0,
+    providerResponses: 0,
+    rewrittenProviderResponses: 0,
+    providerInputTokens: 0,
+    providerOutputTokens: 0,
+    providerCacheReadTokens: 0,
+    providerCacheWriteTokens: 0,
+    providerCost: 0,
+    rewrittenProviderInputTokens: 0,
+    rewrittenProviderCacheReadTokens: 0,
+    rewrittenProviderCost: 0,
   };
 }
 
@@ -198,4 +260,9 @@ function renderCauses(causes: HygieneMetrics["retirementsByCause"]): string {
   const entries = Object.entries(causes);
   if (entries.length === 0) return "none";
   return entries.map(([cause, bucket]) => `${cause}=${bucket.count}/~${bucket.tokens}t`).join(", ");
+}
+
+function ratio(numerator: number, denominator: number): string {
+  if (denominator <= 0) return "n/a";
+  return `${((numerator / denominator) * 100).toFixed(2)}%`;
 }

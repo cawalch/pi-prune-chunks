@@ -9,16 +9,17 @@ npm run pack:dry
 
 The architecture suite covers:
 
-- 32k, 64k, 200k, and 1M budget/headroom behavior;
-- exact duplicates, zero-result searches, fully covered reads, terminal tools,
-  and negative supersession cases;
-- shown-once eligibility, budget overflow, oversized partial results, restored
+- 32k, 64k, 200k, and 1M percentage-trigger behavior;
+- no ingestion-time deletion for duplicates or zero-result searches;
+- shown-once eligibility, pressure recovery, oversized partial results, restored
   grace, active paths, anchors, failures, diffs, and newest/young output;
 - sequential and parallel provider pairs, mixed assistant text, partial
   markers, missing pairs, malformed duplicates, and empty-message avoidance;
 - post-compaction reconciliation and transcript/delta resume;
-- 1,000 unchanged 70% hooks with no rewrite, persistence entry, notification,
-  model management tool, or compaction call; and
+- 1,000 unchanged 89% hooks, with tracked output above v0.2's former cap, with
+  no rewrite, mutation, persistence entry, notification, model management tool,
+  or compaction call;
+- provider-reported input/output/cache/cost telemetry and rewrite attribution;
 - 100 archived results with scheduled rather than per-write directory scans.
 
 Benchmarks:
@@ -29,8 +30,7 @@ npm run bench:cache
 npm run bench:replay
 ```
 
-The replay compares no cleanup, the v0.1 pressure/tombstone shape, and v0.2.
-Fact retention is counted only by searching the actual provider messages; no
-oracle summary injects facts that the strategy discarded. Acceptance requires
-critical facts to remain and every surviving tool result to have a matching
-tool call.
+The replay compares no cleanup, v0.3 below pressure, and a v0.3 pressure sweep.
+Below pressure must be byte-identical to no cleanup. Fact retention is counted
+only by searching actual provider messages; no oracle summary injects discarded
+facts. A pressure sweep must preserve protected facts and valid tool pairs.

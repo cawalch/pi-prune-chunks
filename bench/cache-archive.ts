@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   const metrics = cache.instrumentation();
   const scheduledScans = metrics.directoryScans - baseline.directoryScans;
 
-  console.log("v0.2 archive fixture");
+  console.log("v0.3 archive fixture");
   console.log(`  100 retired results: ${durationMs.toFixed(1)}ms`);
   console.log(`  cleanup scans during writes: ${scheduledScans}`);
   console.log(`  scheduled cleanups during writes: ${metrics.cleanups - baseline.cleanups}`);
