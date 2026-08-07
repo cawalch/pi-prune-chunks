@@ -1,9 +1,8 @@
 import { matchingReasoningAnchor } from "./anchors";
-import { isReamerxExploratoryTool, isReamerxTerminalTool } from "./collector";
 import type { ChunkRegistry } from "./registry";
 import type { ContextChunk, ContextUsage, PreserveContext, PruneChunksConfig } from "./types";
 
-export type RetirementCause = "budget" | "emergency" | "redundant" | "manual";
+export type RetirementCause = "pressure" | "manual";
 
 export type RetirementCandidate = {
   id: string;
@@ -16,15 +15,14 @@ export type RetirementCandidate = {
 
 export type RetirementPlan = {
   cause: RetirementCause;
-  budgetTokens: number | null;
+  targetTokens: number | null;
   activeTokens: number;
   targetSavings: number;
   estimatedSavings: number;
   candidates: RetirementCandidate[];
 };
 
-export type EmergencySweepState = {
-  registryRevision: number;
+export type PressureSweepState = {
   usageTokens: number;
 };
 
@@ -37,89 +35,19 @@ export function contextPercent(usage?: ContextUsage | null): number | null {
   return null;
 }
 
-export function activeToolBudget(
-  contextWindow: number | null | undefined,
-  config: PruneChunksConfig,
-): number {
-  if (contextWindow == null) return config.budget.maxTokens;
-  const derived = Math.floor(contextWindow * config.budget.windowFraction);
-  return clamp(derived, config.budget.minTokens, config.budget.maxTokens);
-}
-
-export function redundantRetirements(
-  registry: ChunkRegistry,
-  current: ContextChunk,
-  config: PruneChunksConfig,
-): RetirementPlan {
-  if (!config.redundancy.enabled) return emptyPlan("redundant", registry);
-  const reasons = new Map<string, string>();
-
-  if (
-    config.redundancy.pruneZeroMatchSearches &&
-    current.risk === "low" &&
-    isZeroMatchSearch(current)
-  ) {
-    reasons.set(current.id, "zero-result search");
-  }
-
-  for (const previous of registry.active()) {
-    if (previous.id === current.id || previous.parentId) continue;
-    if (previous.pinned || previous.risk === "high") continue;
-    if (sameContent(previous, current)) {
-      reasons.set(previous.id, "exact duplicate superseded by newer output");
-      continue;
-    }
-    if (fullyCoveredFileRead(previous, current)) {
-      reasons.set(previous.id, "older file range fully covered by newer read");
-      continue;
-    }
-    if (
-      config.redundancy.pruneReamerxExplorationAfterTerminal &&
-      current.risk !== "high" &&
-      isReamerxTerminalTool(current.toolName) &&
-      isReamerxExploratoryTool(previous.toolName) &&
-      sameScope(previous, current)
-    ) {
-      reasons.set(previous.id, `exploration superseded by ${current.toolName}`);
-    }
-  }
-
-  const candidates = [...reasons].map(([id, reason]) => candidate(registry.get(id)!, reason));
-  return {
-    cause: "redundant",
-    budgetTokens: null,
-    activeTokens: registry.summary().activeTokens,
-    targetSavings: candidates.reduce((sum, item) => sum + item.tokenEstimate, 0),
-    estimatedSavings: candidates.reduce((sum, item) => sum + item.tokenEstimate, 0),
-    candidates,
-  };
-}
-
-export function budgetRetirementPlan(
+export function pressureRetirementPlan(
   registry: ChunkRegistry,
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
   options: { now?: number; preserve?: PreserveContext; limit?: number } = {},
 ): RetirementPlan {
-  const activeTokens = registry.summary().activeTokens;
-  const budgetTokens = activeToolBudget(usage?.contextWindow, config);
-  const targetSavings = Math.max(0, activeTokens - budgetTokens);
-  return buildPlan("budget", registry, config, targetSavings, budgetTokens, options);
-}
-
-export function emergencyRetirementPlan(
-  registry: ChunkRegistry,
-  usage: ContextUsage | null | undefined,
-  config: PruneChunksConfig,
-  options: { now?: number; preserve?: PreserveContext; limit?: number } = {},
-): RetirementPlan {
-  const ceiling =
+  const targetTokens =
     usage?.contextWindow == null
       ? null
-      : Math.max(0, usage.contextWindow - config.emergency.minResponseHeadroomTokens);
+      : Math.floor((usage.contextWindow * config.pressure.targetPercent) / 100);
   const targetSavings =
-    ceiling == null || usage?.tokens == null ? 0 : Math.max(0, usage.tokens - ceiling);
-  return buildPlan("emergency", registry, config, targetSavings, null, options);
+    targetTokens == null || usage?.tokens == null ? 0 : Math.max(0, usage.tokens - targetTokens);
+  return buildPlan("pressure", registry, config, targetSavings, targetTokens, options);
 }
 
 export function manualRetirementPlan(
@@ -130,18 +58,15 @@ export function manualRetirementPlan(
   return buildPlan("manual", registry, config, Number.POSITIVE_INFINITY, null, options);
 }
 
-export function shouldRunEmergencySweep(
+export function shouldRunPressureSweep(
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
-  registryRevision: number,
-  previous?: EmergencySweepState,
+  previous?: PressureSweepState,
 ): boolean {
   if (usage?.tokens == null || usage.contextWindow == null) return false;
-  const ceiling = Math.max(0, usage.contextWindow - config.emergency.minResponseHeadroomTokens);
-  if (usage.tokens <= ceiling) return false;
+  if ((usage.tokens / usage.contextWindow) * 100 < config.pressure.triggerPercent) return false;
   if (!previous) return true;
-  if (previous.registryRevision !== registryRevision) return true;
-  return usage.tokens >= previous.usageTokens + config.emergency.retryAfterGrowthTokens;
+  return usage.tokens >= previous.usageTokens + config.pressure.retryAfterGrowthTokens;
 }
 
 export function isFailureLike(chunk: ContextChunk): boolean {
@@ -157,14 +82,14 @@ function buildPlan(
   registry: ChunkRegistry,
   config: PruneChunksConfig,
   targetSavings: number,
-  budgetTokens: number | null,
+  targetTokens: number | null,
   options: { now?: number; preserve?: PreserveContext; limit?: number },
 ): RetirementPlan {
   const activeTokens = registry.summary().activeTokens;
   if (targetSavings <= 0) {
     return {
       cause,
-      budgetTokens,
+      targetTokens,
       activeTokens,
       targetSavings: 0,
       estimatedSavings: 0,
@@ -189,7 +114,7 @@ function buildPlan(
   }
   return {
     cause,
-    budgetTokens,
+    targetTokens,
     activeTokens,
     targetSavings,
     estimatedSavings,
@@ -204,8 +129,8 @@ function eligibleCandidates(
   preserve?: PreserveContext,
 ): RetirementCandidate[] {
   const active = registry.active();
-  const recentFamilies = recentFamilyIds(active, config.budget.preserveRecentResults);
-  const preserveMs = config.budget.preserveRecentMinutes * 60_000;
+  const recentFamilies = recentFamilyIds(active, config.pressure.preserveRecentResults);
+  const preserveMs = config.pressure.preserveRecentMinutes * 60_000;
   const activeChildren = new Set(
     active.filter((chunk) => chunk.parentId).map((chunk) => chunk.parentId as string),
   );
@@ -263,54 +188,6 @@ function isPathPreserved(chunk: ContextChunk, paths: Set<string> | undefined): b
   return false;
 }
 
-function sameContent(previous: ContextChunk, current: ContextChunk): boolean {
-  return (
-    previous.kind === current.kind &&
-    !!previous.source?.contentHash &&
-    previous.source.contentHash === current.source?.contentHash
-  );
-}
-
-function fullyCoveredFileRead(previous: ContextChunk, current: ContextChunk): boolean {
-  if (previous.kind !== "file_read" || current.kind !== "file_read") return false;
-  if (current.risk === "high") return false;
-  if (!samePath(previous, current)) return false;
-  if (
-    previous.source?.startLine == null ||
-    previous.source.endLine == null ||
-    current.source?.startLine == null ||
-    current.source.endLine == null
-  ) {
-    return false;
-  }
-  return (
-    current.source.startLine <= previous.source.startLine &&
-    current.source.endLine >= previous.source.endLine
-  );
-}
-
-function samePath(previous: ContextChunk, current: ContextChunk): boolean {
-  return (
-    !!previous.source?.path &&
-    !!current.source?.path &&
-    normalizePath(previous.source.path) === normalizePath(current.source.path)
-  );
-}
-
-function sameScope(previous: ContextChunk, current: ContextChunk): boolean {
-  return (
-    (previous.scope?.scope ?? "main") === (current.scope?.scope ?? "main") &&
-    (previous.scope?.runId ?? "") === (current.scope?.runId ?? "")
-  );
-}
-
-function isZeroMatchSearch(chunk: ContextChunk): boolean {
-  if (chunk.kind !== "search") return false;
-  return /(?:\b0\s+(?:exact\s+)?(?:matches|results|hits)\b|\bno\s+(?:matches|results|hits)(?:\s+found)?\b)/i.test(
-    `${chunk.label}\n${chunk.summary ?? ""}`,
-  );
-}
-
 function candidate(chunk: ContextChunk, reason: string): RetirementCandidate {
   return {
     id: chunk.id,
@@ -322,21 +199,6 @@ function candidate(chunk: ContextChunk, reason: string): RetirementCandidate {
   };
 }
 
-function emptyPlan(cause: RetirementCause, registry: ChunkRegistry): RetirementPlan {
-  return {
-    cause,
-    budgetTokens: null,
-    activeTokens: registry.summary().activeTokens,
-    targetSavings: 0,
-    estimatedSavings: 0,
-    candidates: [],
-  };
-}
-
 function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }

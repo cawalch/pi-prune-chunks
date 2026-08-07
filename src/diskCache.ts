@@ -65,7 +65,7 @@ export class DiskChunkContentCache implements ChunkContentCache {
     }
   }
 
-  /** Disk storage is archive-only in v0.2; active results stay in memory. */
+  /** Disk storage is archive-only; active results stay in memory. */
   set(_id: string, _content: ContentBlock[]): void {}
 
   async archive(id: string, content: ContentBlock[]): Promise<void> {

@@ -14,21 +14,12 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     minChunkTokens: 200,
     maxSummaryChars: 180,
   },
-  budget: {
-    windowFraction: 0.25,
-    minTokens: 8_192,
-    maxTokens: 65_536,
+  pressure: {
+    triggerPercent: 90,
+    targetPercent: 80,
+    retryAfterGrowthTokens: 8_192,
     preserveRecentResults: 6,
     preserveRecentMinutes: 3,
-  },
-  emergency: {
-    minResponseHeadroomTokens: 8_192,
-    retryAfterGrowthTokens: 2_048,
-  },
-  redundancy: {
-    enabled: true,
-    pruneZeroMatchSearches: true,
-    pruneReamerxExplorationAfterTerminal: true,
   },
   contextGuards: {
     compactFailedToolValidation: true,
@@ -44,15 +35,10 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
 
 type RawDiskCacheConfig = boolean | Partial<DiskCacheConfig> | undefined;
 export type RawPruneChunksConfig = Partial<
-  Omit<
-    PruneChunksConfig,
-    "budget" | "contextGuards" | "emergency" | "redundancy" | "restore" | "track"
-  >
+  Omit<PruneChunksConfig, "contextGuards" | "pressure" | "restore" | "track">
 > & {
   track?: Partial<PruneChunksConfig["track"]>;
-  budget?: Partial<PruneChunksConfig["budget"]>;
-  emergency?: Partial<PruneChunksConfig["emergency"]>;
-  redundancy?: Partial<PruneChunksConfig["redundancy"]>;
+  pressure?: Partial<PruneChunksConfig["pressure"]>;
   contextGuards?: Partial<PruneChunksConfig["contextGuards"]>;
   restore?: Partial<Omit<PruneChunksConfig["restore"], "diskCache">> & {
     diskCache?: RawDiskCacheConfig;
@@ -62,17 +48,29 @@ export type RawPruneChunksConfig = Partial<
   decisionCards?: unknown;
   tombstones?: unknown;
   reamerx?: unknown;
+  budget?: unknown;
+  emergency?: unknown;
+  redundancy?: unknown;
 };
 
-const LEGACY_KEYS = ["profile", "autoPrune", "decisionCards", "tombstones", "reamerx"] as const;
+const LEGACY_KEYS = [
+  "profile",
+  "autoPrune",
+  "decisionCards",
+  "tombstones",
+  "reamerx",
+  "budget",
+  "emergency",
+  "redundancy",
+] as const;
 
 export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksConfig {
   if (!input) return structuredClone(DEFAULT_CONFIG);
   const legacy = LEGACY_KEYS.filter((key) => input[key] !== undefined);
   if (legacy.length > 0) {
     throw new Error(
-      `pi-prune-chunks v0.2 no longer supports ${legacy.join(", ")}. ` +
-        "Migrate to budget, emergency, redundancy, and restore settings; see README.md.",
+      `pi-prune-chunks v0.3 no longer supports ${legacy.join(", ")}. ` +
+        "Remove the old policy and configure pressure and restore settings; see README.md.",
     );
   }
 
@@ -80,9 +78,7 @@ export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksCon
     enabled: input.enabled ?? DEFAULT_CONFIG.enabled,
     trackTools: input.trackTools ?? [...DEFAULT_CONFIG.trackTools],
     track: { ...DEFAULT_CONFIG.track, ...input.track },
-    budget: { ...DEFAULT_CONFIG.budget, ...input.budget },
-    emergency: { ...DEFAULT_CONFIG.emergency, ...input.emergency },
-    redundancy: { ...DEFAULT_CONFIG.redundancy, ...input.redundancy },
+    pressure: { ...DEFAULT_CONFIG.pressure, ...input.pressure },
     contextGuards: { ...DEFAULT_CONFIG.contextGuards, ...input.contextGuards },
     restore: {
       memory: input.restore?.memory ?? DEFAULT_CONFIG.restore.memory,
@@ -103,19 +99,20 @@ function mergeDiskCacheConfig(input: RawDiskCacheConfig): DiskCacheConfig {
 }
 
 function validateConfig(config: PruneChunksConfig): void {
-  if (!(config.budget.windowFraction > 0 && config.budget.windowFraction <= 1)) {
-    throw new Error("pruneChunks.budget.windowFraction must be greater than 0 and at most 1");
-  }
-  if (config.budget.minTokens < 0 || config.budget.maxTokens < config.budget.minTokens) {
-    throw new Error("pruneChunks budget token bounds are invalid");
-  }
-  if (config.budget.preserveRecentResults < 0 || config.budget.preserveRecentMinutes < 0) {
-    throw new Error("pruneChunks budget preservation values cannot be negative");
+  if (
+    !(config.pressure.targetPercent > 0) ||
+    !(config.pressure.triggerPercent > config.pressure.targetPercent) ||
+    config.pressure.triggerPercent > 100
+  ) {
+    throw new Error(
+      "pruneChunks pressure percentages must satisfy 0 < targetPercent < triggerPercent <= 100",
+    );
   }
   if (
-    config.emergency.minResponseHeadroomTokens < 0 ||
-    config.emergency.retryAfterGrowthTokens < 0
+    config.pressure.retryAfterGrowthTokens < 0 ||
+    config.pressure.preserveRecentResults < 0 ||
+    config.pressure.preserveRecentMinutes < 0
   ) {
-    throw new Error("pruneChunks emergency token values cannot be negative");
+    throw new Error("pruneChunks pressure retry and preservation values cannot be negative");
   }
 }

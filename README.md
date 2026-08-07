@@ -1,30 +1,19 @@
 # pi-prune-chunks
 
-`pi-prune-chunks` keeps a bounded working set of bulky tool output in the
-provider context. It is invisible to the model: there are no pruning tools,
-restore instructions, decision cards, or context-management turns.
+`pi-prune-chunks` is a narrow pressure safety rail for unusually tool-heavy Pi
+sessions. Below 90% context usage it does not automatically retire tool output.
+It is invisible to the model: there are no pruning tools, restore instructions,
+decision cards, or context-management turns.
 
 Pi still owns conversation compaction. The extension never calls
 `ctx.compact()`, never blocks ordinary agent tools, and never rewrites the saved
 Pi transcript.
 
-## What v0.2 does
+## What v0.3 does
 
-The extension retires output in two ways:
-
-1. Provably redundant output is retired immediately: exact duplicates,
-   zero-result searches, older file reads fully covered by a newer range, and
-   exploratory ReamerX results superseded by a terminal result.
-2. Unique low-risk output becomes eligible only after one provider pass. When
-   active tool output exceeds its budget, the oldest safe results are retired.
-
-The active tool-output budget is:
-
-```text
-clamp(contextWindow × 25%, 8,192, 65,536) tokens
-```
-
-By default, the extension preserves:
+At or above 90% provider-context usage, the extension may perform one batched
+sweep of old, low-risk, already-seen tool output, targeting 80%. It waits until
+a result has appeared in at least one provider request. It preserves:
 
 - high-risk output, current failures, and diffs;
 - active paths and reasoning anchors;
@@ -32,11 +21,15 @@ By default, the extension preserves:
 - the six newest results; and
 - results younger than three minutes.
 
-Crossing 70% context usage has no special meaning in v0.2. A rare emergency
-sweep can retire safe old tool output above `contextWindow - 8,192` to create
-response headroom. It runs at most once until tracked content changes or usage
-grows another 2,048 tokens. Pi then decides whether conversation compaction is
+There is no fixed tool-output budget and no immediate deletion of duplicates or
+zero-result searches. A sweep is not retried until provider usage grows by
+another 8,192 tokens. Pi still decides whether conversation compaction is
 needed.
+
+This is deliberately less ambitious than v0.2. A controlled live A/B found
+that v0.2 reduced average context by 7.94% but increased provider-reported cost
+by 76.37% because repeated history rewrites destroyed cache reuse. See the
+[July/August 2026 research and experiment](docs/research-2026-08.md).
 
 ## Provider safety and restore
 
@@ -80,21 +73,17 @@ to the model:
 
 ## Configuration
 
-The defaults are usually sufficient. All v0.2 policy settings are explicit:
+The defaults are usually sufficient. The pressure policy is explicit:
 
 ```json
 {
   "pruneChunks": {
-    "budget": {
-      "windowFraction": 0.25,
-      "minTokens": 8192,
-      "maxTokens": 65536,
+    "pressure": {
+      "triggerPercent": 90,
+      "targetPercent": 80,
+      "retryAfterGrowthTokens": 8192,
       "preserveRecentResults": 6,
       "preserveRecentMinutes": 3
-    },
-    "emergency": {
-      "minResponseHeadroomTokens": 8192,
-      "retryAfterGrowthTokens": 2048
     },
     "track": {
       "minChunkTokens": 200,
@@ -116,15 +105,15 @@ The defaults are usually sufficient. All v0.2 policy settings are explicit:
 }
 ```
 
-`enabled`, `trackTools`, `contextGuards`, `redundancy`, restore/cache, and debug
-controls are also configurable; see [the policy reference](docs/auto-prune-policy.md).
+`enabled`, `trackTools`, `contextGuards`, restore/cache, and debug controls are
+also configurable; see [the policy reference](docs/auto-prune-policy.md).
 
-## v0.1 migration
+## Migration
 
-v0.2 is intentionally breaking. Remove `profile`, `autoPrune`,
-`decisionCards`, `tombstones`, and `reamerx` policy blocks. The extension emits
-a clear startup error if it sees one of these keys instead of silently mapping
-old behavior.
+v0.3 rejects v0.2 `budget`, `emergency`, and `redundancy` blocks as well as the
+older `profile`, `autoPrune`, `decisionCards`, `tombstones`, and `reamerx`
+blocks. Remove them or replace them with `pressure`. Old v0.2 retirement deltas
+are ignored, so upgrading reconstructs active content from the raw transcript.
 
 The following model-facing tools were removed:
 `list_context_chunks`, `prune_chunks`, `restore_chunks`, `pin_chunks`,
@@ -148,3 +137,4 @@ Detailed design and acceptance notes:
 - [Tool adapters](docs/tool-adapters.md)
 - [Failure modes](docs/failure-modes.md)
 - [Testing](docs/testing.md)
+- [July/August 2026 research](docs/research-2026-08.md)

@@ -3,11 +3,11 @@
 import extension from "../index";
 
 async function main(): Promise<void> {
-const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
-const modelTools: unknown[] = [];
-const stateEntries: unknown[] = [];
-const notifications: string[] = [];
-let compactCalls = 0;
+  const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
+  const modelTools: unknown[] = [];
+  const stateEntries: unknown[] = [];
+  const notifications: string[] = [];
+  let compactCalls = 0;
 
 extension({
   settings: {
@@ -28,29 +28,29 @@ extension({
   },
 } as any);
 
-const messages: any[] = [];
-for (let index = 0; index < 12; index++) {
-  const id = `churn-${index}`;
-  const output = `src/file-${index}.ts:1: unique hit ${index}\n`.repeat(20);
-  await handlers.tool_result(
-    { toolCallId: id, toolName: "rg", content: [{ type: "text", text: output }] },
-    {},
-  );
-  messages.push({
-    role: "assistant",
-    content: [{ type: "toolCall", id, name: "rg", arguments: { query: `unique-${index}` } }],
-  });
-  messages.push({
-    role: "toolResult",
-    toolCallId: id,
-    toolName: "rg",
-    content: [{ type: "text", text: output }],
-  });
-}
+  const messages: any[] = [];
+  for (let index = 0; index < 12; index++) {
+    const id = `churn-${index}`;
+    const output = `src/file-${index}.ts:1: unique hit ${index}\n`.repeat(100);
+    await handlers.tool_result(
+      { toolCallId: id, toolName: "rg", content: [{ type: "text", text: output }] },
+      {},
+    );
+    messages.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id, name: "rg", arguments: { query: `unique-${index}` } }],
+    });
+    messages.push({
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "rg",
+      content: [{ type: "text", text: output }],
+    });
+  }
 
 const ctx = {
   hasUI: true,
-  getContextUsage: () => ({ tokens: 22_400, contextWindow: 32_000, percent: 70 }),
+  getContextUsage: () => ({ tokens: 28_480, contextWindow: 32_000, percent: 89 }),
   compact() {
     compactCalls += 1;
   },
@@ -69,7 +69,7 @@ for (let pass = 0; pass < 1_000; pass++) {
 }
 const durationMs = performance.now() - startedAt;
 
-console.log("70% unchanged-context churn replay");
+console.log("89% unchanged-context churn replay (tracked output exceeds v0.2's old cap)");
 console.log(`  passes: 1,000 in ${durationMs.toFixed(1)}ms`);
 console.log(`  provider rewrites: ${rewrites}`);
 console.log(`  state entries: ${stateEntries.length}`);
@@ -84,7 +84,7 @@ if (
   modelTools.length !== 0 ||
   compactCalls !== 0
 ) {
-  throw new Error("70% pressure alone caused context-management churn");
+  throw new Error("below-threshold context caused v0.3 management churn");
 }
 }
 

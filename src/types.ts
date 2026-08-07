@@ -121,21 +121,12 @@ export type PruneChunksConfig = {
     minChunkTokens: number;
     maxSummaryChars: number;
   };
-  budget: {
-    windowFraction: number;
-    minTokens: number;
-    maxTokens: number;
+  pressure: {
+    triggerPercent: number;
+    targetPercent: number;
+    retryAfterGrowthTokens: number;
     preserveRecentResults: number;
     preserveRecentMinutes: number;
-  };
-  emergency: {
-    minResponseHeadroomTokens: number;
-    retryAfterGrowthTokens: number;
-  };
-  redundancy: {
-    enabled: boolean;
-    pruneZeroMatchSearches: boolean;
-    pruneReamerxExplorationAfterTerminal: boolean;
   };
   contextGuards: {
     compactFailedToolValidation: boolean;
@@ -235,6 +226,6 @@ export type StateDeltaAction = {
 };
 
 export type PersistedStateDelta = {
-  version: 2;
+  version: 3;
   actions: StateDeltaAction[];
 };
