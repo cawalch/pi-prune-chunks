@@ -1,8 +1,9 @@
 import { matchingReasoningAnchor } from "./anchors";
+import { isReamerxExploratoryTool, isReamerxTerminalTool } from "./collector";
 import type { ChunkRegistry } from "./registry";
 import type { ContextChunk, ContextUsage, PreserveContext, PruneChunksConfig } from "./types";
 
-export type RetirementCause = "pressure" | "manual";
+export type RetirementCause = "working_set" | "pressure" | "manual";
 
 export type RetirementCandidate = {
   id: string;
@@ -24,6 +25,10 @@ export type RetirementPlan = {
 
 export type PressureSweepState = {
   usageTokens: number;
+};
+
+export type WorkingSetSweepState = {
+  activeTokens: number;
 };
 
 export function contextPercent(usage?: ContextUsage | null): number | null {
@@ -50,6 +55,23 @@ export function pressureRetirementPlan(
   return buildPlan("pressure", registry, config, targetSavings, targetTokens, options);
 }
 
+export function workingSetRetirementPlan(
+  registry: ChunkRegistry,
+  config: PruneChunksConfig,
+  options: { now?: number; preserve?: PreserveContext; limit?: number } = {},
+): RetirementPlan {
+  const activeTokens = registry.summary().activeTokens;
+  const targetSavings = Math.max(0, activeTokens - config.workingSet.targetTokens);
+  return buildPlan(
+    "working_set",
+    registry,
+    config,
+    targetSavings,
+    config.workingSet.targetTokens,
+    options,
+  );
+}
+
 export function manualRetirementPlan(
   registry: ChunkRegistry,
   config: PruneChunksConfig,
@@ -67,6 +89,16 @@ export function shouldRunPressureSweep(
   if ((usage.tokens / usage.contextWindow) * 100 < config.pressure.triggerPercent) return false;
   if (!previous) return true;
   return usage.tokens >= previous.usageTokens + config.pressure.retryAfterGrowthTokens;
+}
+
+export function shouldRunWorkingSetSweep(
+  activeTokens: number,
+  config: PruneChunksConfig,
+  previous?: WorkingSetSweepState,
+): boolean {
+  if (activeTokens < config.workingSet.triggerTokens) return false;
+  if (!previous) return true;
+  return activeTokens >= previous.activeTokens + config.workingSet.retryAfterGrowthTokens;
 }
 
 export function isFailureLike(chunk: ContextChunk): boolean {
@@ -129,14 +161,14 @@ function eligibleCandidates(
   preserve?: PreserveContext,
 ): RetirementCandidate[] {
   const active = registry.active();
-  const recentFamilies = recentFamilyIds(active, config.pressure.preserveRecentResults);
-  const preserveMs = config.pressure.preserveRecentMinutes * 60_000;
+  const recentFamilies = recentFamilyIds(active, config.retention.preserveRecentResults);
+  const preserveMs = config.retention.preserveRecentMinutes * 60_000;
   const activeChildren = new Set(
     active.filter((chunk) => chunk.parentId).map((chunk) => chunk.parentId as string),
   );
   const eligible: RetirementCandidate[] = [];
 
-  for (const chunk of active) {
+  for (const [index, chunk] of active.entries()) {
     if (!chunk.parentId && activeChildren.has(chunk.id)) continue;
     if (chunk.pinned || chunk.risk !== "low" || chunk.lastSeenAt == null) continue;
     if (chunk.kind === "diff" || isFailureLike(chunk)) continue;
@@ -148,17 +180,51 @@ function eligibleCandidates(
       continue;
     if (isPathPreserved(chunk, preserve?.paths)) continue;
     if (matchingReasoningAnchor(chunk, preserve?.anchors, registry.getContent(chunk.id))) continue;
+    const evidence = chunk.parentId ? undefined : staleEvidence(chunk, index, active);
     eligible.push(
-      candidate(chunk, chunk.part ? "old low-risk bulk output" : "old low-risk output"),
+      candidate(
+        chunk,
+        evidence ?? (chunk.part ? "old low-risk bulk output" : "old low-risk output"),
+      ),
     );
   }
 
   eligible.sort(
     (a, b) =>
+      evidenceRank(a.reason) - evidenceRank(b.reason) ||
       (registry.get(a.id)?.createdAt ?? 0) - (registry.get(b.id)?.createdAt ?? 0) ||
       b.tokenEstimate - a.tokenEstimate,
   );
   return eligible;
+}
+
+function staleEvidence(
+  previous: ContextChunk,
+  previousIndex: number,
+  active: ContextChunk[],
+): string | undefined {
+  if (isZeroMatchSearch(previous)) return "zero-result search";
+  for (let index = previousIndex + 1; index < active.length; index++) {
+    const current = active[index];
+    if (current.parentId) continue;
+    if (sameContent(previous, current)) return "exact duplicate superseded by newer output";
+    if (fullyCoveredFileRead(previous, current)) {
+      return "older file range fully covered by newer read";
+    }
+    if (
+      current.risk !== "high" &&
+      isReamerxTerminalTool(current.toolName) &&
+      isReamerxExploratoryTool(previous.toolName) &&
+      sameScope(previous, current)
+    ) {
+      return `exploration superseded by ${current.toolName}`;
+    }
+  }
+  return undefined;
+}
+
+function evidenceRank(reason: string): number {
+  return reason === "old low-risk output" || reason === "old low-risk bulk output" ? 1 : 0;
 }
 
 function recentFamilyIds(chunks: ContextChunk[], count: number): Set<string> {
@@ -186,6 +252,53 @@ function isPathPreserved(chunk: ContextChunk, paths: Set<string> | undefined): b
     }
   }
   return false;
+}
+
+function sameContent(previous: ContextChunk, current: ContextChunk): boolean {
+  return (
+    previous.kind === current.kind &&
+    !!previous.source?.contentHash &&
+    previous.source.contentHash === current.source?.contentHash
+  );
+}
+
+function fullyCoveredFileRead(previous: ContextChunk, current: ContextChunk): boolean {
+  if (previous.kind !== "file_read" || current.kind !== "file_read") return false;
+  if (current.risk === "high" || !samePath(previous, current)) return false;
+  if (
+    previous.source?.startLine == null ||
+    previous.source.endLine == null ||
+    current.source?.startLine == null ||
+    current.source.endLine == null
+  ) {
+    return false;
+  }
+  return (
+    current.source.startLine <= previous.source.startLine &&
+    current.source.endLine >= previous.source.endLine
+  );
+}
+
+function samePath(previous: ContextChunk, current: ContextChunk): boolean {
+  return (
+    !!previous.source?.path &&
+    !!current.source?.path &&
+    normalizePath(previous.source.path) === normalizePath(current.source.path)
+  );
+}
+
+function sameScope(previous: ContextChunk, current: ContextChunk): boolean {
+  return (
+    (previous.scope?.scope ?? "main") === (current.scope?.scope ?? "main") &&
+    (previous.scope?.runId ?? "") === (current.scope?.runId ?? "")
+  );
+}
+
+function isZeroMatchSearch(chunk: ContextChunk): boolean {
+  if (chunk.kind !== "search") return false;
+  return /(?:\b0\s+(?:exact\s+)?(?:matches|results|hits)\b|\bno\s+(?:matches|results|hits)(?:\s+found)?\b)/i.test(
+    `${chunk.label}\n${chunk.summary ?? ""}`,
+  );
 }
 
 function candidate(chunk: ContextChunk, reason: string): RetirementCandidate {

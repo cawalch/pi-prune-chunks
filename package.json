@@ -1,7 +1,7 @@
 {
   "name": "pi-prune-chunks",
-  "version": "0.3.0",
-  "description": "Cache-aware pressure safety rail for bulky Pi tool output",
+  "version": "0.4.0",
+  "description": "Cache-conscious long-horizon tool-output working-set control for Pi",
   "main": "index.ts",
   "files": [
     "index.ts",
@@ -30,6 +30,8 @@
     "pi",
     "pi-coding-agent",
     "pi-extension",
+    "context-rot",
+    "long-horizon-agents",
     "tool-output-hygiene",
     "context-working-set",
     "reamer"

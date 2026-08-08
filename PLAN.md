@@ -1,5 +1,12 @@
 # pi-prune-chunks Planning Brief
 
+> Historical v0.1 design, superseded by `README.md` and
+> `docs/architecture.md`. Do not reintroduce the model-facing management tools,
+> tombstones, restore instructions, continuation manifests, or compaction
+> workflow described below. Current value comes from batched filtering of stale
+> tool observations on Pi's provider-bound context copy; Pi alone owns
+> conversation compaction, and restore is user-only rollback.
+
 ## Project Summary
 
 `pi-prune-chunks` is a Pi coding-agent extension that reduces context-window pressure by tracking large tool-result payloads, replacing low-value historical content with compact tombstones before provider calls, and allowing the agent to restore pruned content when needed.
@@ -1312,4 +1319,3 @@ The first useful version should make this possible:
 4. Provider sees tombstones instead of massive stale outputs.
 5. Agent restores only what it needs.
 6. Session avoids compaction cliffs and continues reliably.
-
