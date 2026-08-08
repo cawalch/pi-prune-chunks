@@ -71,8 +71,9 @@ export function renderStatus(
     `Provider context: ${provider}`,
     `Tracked active tool output: ~${summary.activeTokens} tokens`,
     `Tracked: ${summary.totalChunks}; retired: ${summary.prunedChunks} (~${summary.prunedTokens}t)`,
-    `Automatic safety sweep: trigger ${config.pressure.triggerPercent}%, target ${config.pressure.targetPercent}%`,
-    `No fixed working-set budget; below-trigger output is left untouched; Pi owns compaction`,
+    `Long-horizon working set: trigger ~${config.workingSet.triggerTokens}t, target ~${config.workingSet.targetTokens}t`,
+    `Emergency pressure rail: trigger ${config.pressure.triggerPercent}%, target ${config.pressure.targetPercent}%`,
+    `Pi owns conversation compaction; retired tool output remains recoverable`,
   ].join("\n");
 }
 
@@ -83,7 +84,7 @@ export function contextFooter(
 ): string {
   const summary = registry.summary();
   const percent = contextPercent(usage);
-  return `[Context: ${percent == null ? "?" : Math.round(percent)}% | pressure: ${config.pressure.triggerPercent}% | tool output: ~${summary.activeTokens}t | retired: ${summary.prunedChunks}]`;
+  return `[Context: ${percent == null ? "?" : Math.round(percent)}% | tool output: ~${summary.activeTokens}t/${config.workingSet.triggerTokens}t | retired: ${summary.prunedChunks}]`;
 }
 
 function labelWithScope(chunk: ChunkListOutput["chunks"][number]): string {

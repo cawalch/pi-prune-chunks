@@ -9,8 +9,13 @@ npm run pack:dry
 
 The architecture suite covers:
 
+- absolute 32,768-to-16,384 tracked-tool working-set behavior independent of
+  model context-window size;
+- shown-once working-set retirement below provider pressure and retry
+  hysteresis based on new tracked-output growth;
 - 32k, 64k, 200k, and 1M percentage-trigger behavior;
-- no ingestion-time deletion for duplicates or zero-result searches;
+- no ingestion-time deletion for duplicates or zero-result searches, with
+  evidence-backed supersession ranked first once a batch is actually needed;
 - shown-once eligibility, pressure recovery, oversized partial results, restored
   grace, active paths, anchors, failures, diffs, and newest/young output;
 - sequential and parallel provider pairs, mixed assistant text, partial
@@ -22,15 +27,6 @@ The architecture suite covers:
 - provider-reported input/output/cache/cost telemetry and rewrite attribution;
 - 100 archived results with scheduled rather than per-write directory scans.
 
-Benchmarks:
-
-```bash
-npm run bench:churn
-npm run bench:cache
-npm run bench:replay
-```
-
-The replay compares no cleanup, v0.3 below pressure, and a v0.3 pressure sweep.
-Below pressure must be byte-identical to no cleanup. Fact retention is counted
-only by searching actual provider messages; no oracle summary injects discarded
-facts. A pressure sweep must preserve protected facts and valid tool pairs.
+No benchmark harness is part of the v0.4 product diff. The live matched result
+is retained as audit evidence in the research note, while the committed gate is
+the deterministic behavioral suite above.

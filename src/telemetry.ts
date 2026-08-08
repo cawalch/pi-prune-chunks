@@ -171,7 +171,7 @@ export function renderTelemetryReport(snapshot: TelemetrySnapshot): string {
       snapshot.metrics.rewrittenProviderCacheReadTokens,
   );
   return [
-    "# Prune Chunks v0.3 Pressure Safety-Rail Report",
+    "# Prune Chunks v0.4 Long-Horizon Working-Set Report",
     "",
     `Generated: ${new Date(snapshot.generatedAt).toISOString()}`,
     `Provider context: ${usageText}`,

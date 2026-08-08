@@ -8,7 +8,12 @@ import { collectToolResult } from "../src/collector";
 import { mergeConfig } from "../src/config";
 import { compactFailedToolValidationMessages } from "../src/contextGuards";
 import { DiskChunkContentCache } from "../src/diskCache";
-import { pressureRetirementPlan, shouldRunPressureSweep } from "../src/pruner";
+import {
+  pressureRetirementPlan,
+  shouldRunPressureSweep,
+  shouldRunWorkingSetSweep,
+  workingSetRetirementPlan,
+} from "../src/pruner";
 import { ChunkRegistry } from "../src/registry";
 import { restoreChunks } from "../src/restorer";
 import { rewriteRetiredExchanges } from "../src/tombstones";
@@ -74,16 +79,35 @@ function result(id: string, text = "result") {
   return { role: "toolResult", toolCallId: id, toolName: "rg", content: textBlock(text) };
 }
 
-describe("v0.3 configuration", () => {
-  test("defaults to a 90%-to-80% pressure safety sweep", () => {
+describe("v0.4 configuration", () => {
+  test("defaults to proactive working-set control plus an emergency pressure rail", () => {
     const cfg = config();
+    assert.deepEqual(cfg.workingSet, {
+      triggerTokens: 32_768,
+      targetTokens: 16_384,
+      retryAfterGrowthTokens: 8_192,
+    });
     assert.deepEqual(cfg.pressure, {
       triggerPercent: 90,
       targetPercent: 80,
       retryAfterGrowthTokens: 8_192,
+    });
+    assert.deepEqual(cfg.retention, {
       preserveRecentResults: 6,
       preserveRecentMinutes: 3,
     });
+  });
+
+  test("triggers rot control by absolute tool-output size, independent of model window", () => {
+    const cfg = config();
+    assert.equal(shouldRunWorkingSetSweep(32_767, cfg), false);
+    assert.equal(shouldRunWorkingSetSweep(32_768, cfg), true);
+    assert.equal(shouldRunWorkingSetSweep(40_959, cfg, { activeTokens: 32_768 }), false);
+    assert.equal(shouldRunWorkingSetSweep(40_960, cfg, { activeTokens: 32_768 }), true);
+    for (const contextWindow of [64_000, 200_000, 1_000_000]) {
+      assert.equal(shouldRunPressureSweep(usage(contextWindow * 0.5, contextWindow), cfg), false);
+      assert.equal(shouldRunWorkingSetSweep(32_768, cfg), true);
+    }
   });
 
   test("requires crossing the percentage trigger", () => {
@@ -107,7 +131,7 @@ describe("v0.3 configuration", () => {
     ]) {
       assert.throws(
         () => mergeConfig({ [key]: {} }),
-        /v0\.3 no longer supports.*configure pressure and restore/,
+        /v0\.4 no longer supports.*configure workingSet.*pressure.*restore/,
       );
     }
   });
@@ -118,9 +142,68 @@ describe("v0.3 configuration", () => {
       /0 < targetPercent < triggerPercent <= 100/,
     );
   });
+
+  test("validates working-set hysteresis", () => {
+    assert.throws(
+      () => mergeConfig({ workingSet: { triggerTokens: 16_384, targetTokens: 16_384 } }),
+      /0 < targetTokens < triggerTokens/,
+    );
+  });
 });
 
-describe("pressure-only policy", () => {
+describe("working-set and pressure retirement policy", () => {
+  test("plans toward an absolute active-tool target before provider pressure", () => {
+    const cfg = config({
+      workingSet: { triggerTokens: 200, targetTokens: 100, retryAfterGrowthTokens: 50 },
+      retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+    });
+    const registry = new ChunkRegistry();
+    addChunk(registry, cfg, "rot-a", "rg", "src/a.ts:1: stale hit\n".repeat(80));
+    addChunk(registry, cfg, "rot-b", "rg", "src/b.ts:1: stale hit\n".repeat(80));
+    const plan = workingSetRetirementPlan(registry, cfg);
+    assert.equal(plan.cause, "working_set");
+    assert.ok(plan.targetSavings > 0);
+    assert.ok(plan.estimatedSavings >= plan.targetSavings);
+  });
+
+  test("ranks proven supersession before generic age within a batched sweep", () => {
+    const cfg = config({
+      workingSet: { triggerTokens: 2, targetTokens: 1, retryAfterGrowthTokens: 1 },
+      retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+    });
+    const registry = new ChunkRegistry();
+    addChunk(
+      registry,
+      cfg,
+      "unique-oldest",
+      "rg",
+      "src/unique.ts:1: unique historical hit\n".repeat(40),
+      undefined,
+      Date.now() - 30 * 60_000,
+    );
+    addChunk(
+      registry,
+      cfg,
+      "duplicate-old",
+      "rg",
+      "src/shared.ts:1: repeated hit\n".repeat(40),
+      undefined,
+      Date.now() - 20 * 60_000,
+    );
+    addChunk(
+      registry,
+      cfg,
+      "duplicate-new",
+      "rg",
+      "src/shared.ts:1: repeated hit\n".repeat(40),
+      undefined,
+      Date.now() - 10 * 60_000,
+    );
+
+    const plan = workingSetRetirementPlan(registry, cfg);
+    assert.equal(plan.candidates[0]?.reason, "exact duplicate superseded by newer output");
+  });
+
   test("unique low-risk output must be shown once before pressure retirement", () => {
     const cfg = config({
       pressure: {
@@ -415,6 +498,7 @@ describe("extension integration", () => {
       "prune-suggest",
     ]);
     assert.equal(app.commands.has("prune-profile"), false);
+    assert.equal(app.handlers.session_before_compact, undefined);
   });
 
   test("enabled=false makes the provider hook completely inert", async () => {
@@ -449,6 +533,33 @@ describe("extension integration", () => {
     assert.deepEqual(messages, snapshot);
     assert.equal(app.entries.length, 0);
     assert.equal(app.notifications.length, 0);
+    assert.equal(app.compactCalls, 0);
+  });
+
+  test("working-set cleanup activates well below provider pressure after one visible pass", async () => {
+    const app = createHarness({
+      workingSet: {
+        triggerTokens: 200,
+        targetTokens: 100,
+        retryAfterGrowthTokens: 100,
+      },
+      retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+    });
+    const output = "src/stale.ts:1: old search hit\n".repeat(120);
+    await app.handlers.tool_result?.(
+      { toolCallId: "stale-working-set", toolName: "rg", content: textBlock(output) },
+      {},
+    );
+    const messages = [
+      assistant([{ id: "stale-working-set" }]),
+      result("stale-working-set", output),
+    ];
+    const ctx = app.context(2_000, 100_000);
+    assert.equal(await app.handlers.context?.({ messages }, ctx), undefined);
+    const transformed = await app.handlers.context?.({ messages }, ctx);
+    assert.deepEqual(transformed?.messages, []);
+    assert.equal(app.entries.length, 1);
+    assert.equal(app.entries[0].data.actions[0].reason, "long-horizon working-set sweep");
     assert.equal(app.compactCalls, 0);
   });
 

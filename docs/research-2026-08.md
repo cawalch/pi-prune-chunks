@@ -2,13 +2,31 @@
 
 ## Verdict
 
-The v0.2 fixed-working-set strategy is not cost-effective for ordinary cached
-Pi sessions. The extension remains defensible only as a rare pressure safety
-rail for a gap in Pi's tool-loop compaction timing. If Pi closes that gap, or if
-provider cache/cost observations show no practical benefit at pressure, this
-plugin should be retired rather than expanded.
+Context rot and compaction are separate problems. Recent long-horizon evidence
+shows that accumulated stale tool output can reduce task accuracy well before a
+window fills, and that trimming can improve outcomes. The repository should be
+kept, but v0.3's pressure-only design did not address that goal. v0.4 restores a
+batched absolute tool-output working set and retains pressure handling only as
+an emergency fallback.
 
-## Controlled live A/B
+The strongest directly relevant results are:
+
+- [Diagnosing and Mitigating Context Rot in Long-horizon Search](https://arxiv.org/abs/2606.29718)
+  controls for query difficulty and finds premature termination rises with
+  trajectory length. Simple discard/keep-latest strategies improve average
+  accuracy across three long-search benchmarks.
+- [Less Context, Better Agents](https://arxiv.org/abs/2606.10209) reports 71.0%
+  completion with full history, 79.0% with five recent tool pairs, and 91.6%
+  with recent pairs plus summaries.
+- [SWE-Pruner Pro](https://arxiv.org/abs/2607.18213) reports up to 39% token
+  savings while preserving quality, plus 3.8 points on SWE-Bench Verified and
+  2.2 points on long-context Oolong.
+- [Self-GC](https://arxiv.org/abs/2607.00692) shows indexed, recoverable,
+  dependency-aware lifecycle control is safer than blind chronological
+  heuristics. v0.4 retains exact archives and protects current dependencies,
+  while acknowledging that its inexpensive heuristic has a lower ceiling.
+
+## Why v0.2 failed
 
 On 2026-08-07, control and v0.2 replayed the same real saved session through Pi
 0.83.0 and `openrouter/z-ai/glm-5.2`. Both arms used equal-length system prompts,
@@ -28,9 +46,9 @@ would require roughly 70 stable turns to break even. That is not a credible
 default strategy for coding sessions.
 
 The repository replay also showed why token reduction is not a quality proof:
-v0.2 reduced an estimated 9,275-token fixture to 3,003 tokens while retaining
-only 5 of 16 ordinary facts. The new replay requires below-pressure output to be
-identical to no cleanup and reports fact deletion explicitly.
+an aggressive sweep reduces an estimated 9,275-token fixture to 3,003 tokens
+while retaining only 5 of 16 ordinary facts. The replay reports fact deletion
+explicitly; only the provider-backed outcome benchmark supports a value claim.
 
 ## v0.3 below-pressure live canary
 
@@ -41,8 +59,8 @@ both first turns. On the second turns they were 261,079 for control and 261,080
 for v0.3; the one-token difference followed a one-token difference in the first
 assistant output. v0.3 wrote zero retirement deltas.
 
-This confirms the intended below-pressure behavior on a real session: no token
-reduction and no result drop. Reported costs still varied between arms because
+This confirmed the intended v0.3 behavior—but also confirmed that it delivered
+no rot control in ordinary long sessions. Reported costs varied between arms because
 OpenRouter divided identical totals differently between fresh input and cache
 reads. That variance is another reason not to infer plugin value from a single
 unmatched run.
@@ -65,15 +83,49 @@ unmatched run.
   [#6879](https://github.com/earendil-works/pi/issues/6879) reports that failure
   mode.
 
-## v0.3 decision rules
+## v0.4 provider-backed rot A/B
 
-1. Never automatically retire output below 90% context usage.
-2. At pressure, perform one cache-disrupting batch toward 80%, then wait for
-   8,192 tokens of further growth before retrying.
-3. Keep the saved transcript authoritative and never call Pi compaction.
-4. Record provider-reported input, output, cache reads/writes, and cost for
-   every observed response; separately identify responses following rewrites.
-5. Do not claim savings from one arm. A savings claim requires a matched control
-   on the same session/model/provider with equal prompts and multiple turns.
-6. Retire the plugin if Pi compacts safely inside tool loops or if matched
-   pressure experiments fail to show lower cost or fewer overflow failures.
+On 2026-08-07, five matched trials ran through Pi 0.83.0 and
+`openrouter/google/gemini-2.5-flash-lite`. Each session contained six current
+authoritative observations behind 65,536 requested tokens of obsolete,
+conflicting tool-output hypotheses. The protocol warmed the common full-history
+prefix, alternated arm order, disabled tools and thinking, rejected compaction,
+and scored an exact six-field current-state object.
+
+| Measure | Full history | v0.4 | Change |
+| --- | ---: | ---: | ---: |
+| Exact current state | 3/5 | 5/5 | +2 trials |
+| Average provider context | 107,482 | 21,885 | -79.6% |
+| Fresh input tokens | 324,011 | 88,182 | -72.8% |
+| Cache-read tokens | 213,399 | 21,243 | -90.0% |
+| Provider-reported answer cost | $0.034693 | $0.009187 | -73.5% |
+| Pi compactions | 0 | 0 | unchanged |
+
+Both full-history failures copied a checksum from obsolete history; v0.4
+returned the six current values in all trials. This is direct evidence of
+reduced stale-state interference, not merely a token estimate.
+
+A separate fully cached trial exposed the intended economic tradeoff. The first
+rewritten v0.4 answer cost $0.002221 versus the cached control's $0.001181. The
+next unchanged v0.4 turn reused 21,235 cached tokens, performed zero additional
+retirements, and cost $0.000290 versus $0.001162 for control. At that rate, a
+second follow-up repays the initial cache-bust premium. This is why v0.4 uses a
+high/low watermark instead of v0.2's incremental churn.
+
+## v0.4 decision rules
+
+1. Trigger normal rot control at 32,768 tracked tool-output tokens, independent
+   of model window size, and target 16,384.
+2. Require 8,192 tokens of new tracked-output growth before another batch.
+3. Protect failures, diffs, current paths, reasoning anchors, recent restores,
+   young results, and the six newest result families.
+4. Keep the saved transcript authoritative, archive retired content exactly,
+   preserve valid tool-call/result pairing, and never call Pi compaction.
+5. Retain the 90%-to-80% provider-pressure gate only as an emergency rail.
+6. Treat the five-trial result as evidence for this controlled stale-state
+   workload, not a universal model ranking; repeat across providers before
+   changing the default thresholds materially.
+
+Exact archiving is a safety property, not evidence of value; no restoration was
+used or scored in the matched result. The benchmark harness and raw reports are
+kept outside the product change.

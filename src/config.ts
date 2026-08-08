@@ -14,10 +14,17 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
     minChunkTokens: 200,
     maxSummaryChars: 180,
   },
+  workingSet: {
+    triggerTokens: 32_768,
+    targetTokens: 16_384,
+    retryAfterGrowthTokens: 8_192,
+  },
   pressure: {
     triggerPercent: 90,
     targetPercent: 80,
     retryAfterGrowthTokens: 8_192,
+  },
+  retention: {
     preserveRecentResults: 6,
     preserveRecentMinutes: 3,
   },
@@ -34,11 +41,20 @@ export const DEFAULT_CONFIG: PruneChunksConfig = {
 };
 
 type RawDiskCacheConfig = boolean | Partial<DiskCacheConfig> | undefined;
+type RawPressureConfig = Partial<PruneChunksConfig["pressure"]> & {
+  preserveRecentResults?: number;
+  preserveRecentMinutes?: number;
+};
 export type RawPruneChunksConfig = Partial<
-  Omit<PruneChunksConfig, "contextGuards" | "pressure" | "restore" | "track">
+  Omit<
+    PruneChunksConfig,
+    "contextGuards" | "pressure" | "restore" | "retention" | "track" | "workingSet"
+  >
 > & {
   track?: Partial<PruneChunksConfig["track"]>;
-  pressure?: Partial<PruneChunksConfig["pressure"]>;
+  workingSet?: Partial<PruneChunksConfig["workingSet"]>;
+  pressure?: RawPressureConfig;
+  retention?: Partial<PruneChunksConfig["retention"]>;
   contextGuards?: Partial<PruneChunksConfig["contextGuards"]>;
   restore?: Partial<Omit<PruneChunksConfig["restore"], "diskCache">> & {
     diskCache?: RawDiskCacheConfig;
@@ -69,8 +85,8 @@ export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksCon
   const legacy = LEGACY_KEYS.filter((key) => input[key] !== undefined);
   if (legacy.length > 0) {
     throw new Error(
-      `pi-prune-chunks v0.3 no longer supports ${legacy.join(", ")}. ` +
-        "Remove the old policy and configure pressure and restore settings; see README.md.",
+      `pi-prune-chunks v0.4 no longer supports ${legacy.join(", ")}. ` +
+        "Remove the old policy and configure workingSet, retention, pressure, and restore settings; see README.md.",
     );
   }
 
@@ -78,7 +94,27 @@ export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksCon
     enabled: input.enabled ?? DEFAULT_CONFIG.enabled,
     trackTools: input.trackTools ?? [...DEFAULT_CONFIG.trackTools],
     track: { ...DEFAULT_CONFIG.track, ...input.track },
-    pressure: { ...DEFAULT_CONFIG.pressure, ...input.pressure },
+    workingSet: { ...DEFAULT_CONFIG.workingSet, ...input.workingSet },
+    pressure: {
+      ...DEFAULT_CONFIG.pressure,
+      triggerPercent: input.pressure?.triggerPercent ?? DEFAULT_CONFIG.pressure.triggerPercent,
+      targetPercent: input.pressure?.targetPercent ?? DEFAULT_CONFIG.pressure.targetPercent,
+      retryAfterGrowthTokens:
+        input.pressure?.retryAfterGrowthTokens ?? DEFAULT_CONFIG.pressure.retryAfterGrowthTokens,
+    },
+    retention: {
+      ...DEFAULT_CONFIG.retention,
+      ...input.retention,
+      // Accept the short-lived v0.3 shape so local settings do not break.
+      preserveRecentResults:
+        input.retention?.preserveRecentResults ??
+        input.pressure?.preserveRecentResults ??
+        DEFAULT_CONFIG.retention.preserveRecentResults,
+      preserveRecentMinutes:
+        input.retention?.preserveRecentMinutes ??
+        input.pressure?.preserveRecentMinutes ??
+        DEFAULT_CONFIG.retention.preserveRecentMinutes,
+    },
     contextGuards: { ...DEFAULT_CONFIG.contextGuards, ...input.contextGuards },
     restore: {
       memory: input.restore?.memory ?? DEFAULT_CONFIG.restore.memory,
@@ -100,6 +136,12 @@ function mergeDiskCacheConfig(input: RawDiskCacheConfig): DiskCacheConfig {
 
 function validateConfig(config: PruneChunksConfig): void {
   if (
+    !(config.workingSet.targetTokens > 0) ||
+    !(config.workingSet.triggerTokens > config.workingSet.targetTokens)
+  ) {
+    throw new Error("pruneChunks working-set tokens must satisfy 0 < targetTokens < triggerTokens");
+  }
+  if (
     !(config.pressure.targetPercent > 0) ||
     !(config.pressure.triggerPercent > config.pressure.targetPercent) ||
     config.pressure.triggerPercent > 100
@@ -109,10 +151,11 @@ function validateConfig(config: PruneChunksConfig): void {
     );
   }
   if (
+    config.workingSet.retryAfterGrowthTokens < 0 ||
     config.pressure.retryAfterGrowthTokens < 0 ||
-    config.pressure.preserveRecentResults < 0 ||
-    config.pressure.preserveRecentMinutes < 0
+    config.retention.preserveRecentResults < 0 ||
+    config.retention.preserveRecentMinutes < 0
   ) {
-    throw new Error("pruneChunks pressure retry and preservation values cannot be negative");
+    throw new Error("pruneChunks retry and retention values cannot be negative");
   }
 }

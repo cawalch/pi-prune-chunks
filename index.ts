@@ -1,5 +1,5 @@
 /**
- * Prune Chunks v0.3 - pressure-only safety rail for bulky tool output.
+ * Prune Chunks v0.4 - proactive working-set control for long-horizon tool output.
  */
 
 import { writeFile } from "node:fs/promises";
@@ -16,6 +16,9 @@ import {
   pressureRetirementPlan,
   type RetirementPlan,
   shouldRunPressureSweep,
+  shouldRunWorkingSetSweep,
+  type WorkingSetSweepState,
+  workingSetRetirementPlan,
 } from "./src/pruner";
 import { ChunkRegistry, MemoryChunkContentCache } from "./src/registry";
 import {
@@ -54,6 +57,7 @@ export default function (pi: ExtensionAPI) {
   const registry = new ChunkRegistry(createContentCache(config));
   const telemetry = new TelemetryRecorder();
   const pendingArchives = new Set<Promise<void>>();
+  let workingSetState: WorkingSetSweepState | undefined;
   let pressureState: PressureSweepState | undefined;
   let pendingProviderRewrite = false;
   let reconcileAfterCompaction = false;
@@ -106,12 +110,10 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    const compactedIds = rebuildRegistry(
-      registry,
-      ctx?.sessionManager?.getEntries?.() ?? [],
-      config,
-    );
+    const entries = ctx?.sessionManager?.getEntries?.() ?? [];
+    const compactedIds = rebuildRegistry(registry, entries, config);
     scheduleArchive(compactedIds);
+    workingSetState = undefined;
     pressureState = undefined;
     pendingProviderRewrite = false;
     reconcileAfterCompaction = false;
@@ -121,6 +123,7 @@ export default function (pi: ExtensionAPI) {
     await Promise.allSettled([...pendingArchives]);
     registry.reset();
     telemetry.reset();
+    workingSetState = undefined;
     pressureState = undefined;
     pendingProviderRewrite = false;
     reconcileAfterCompaction = false;
@@ -128,6 +131,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_compact", async () => {
     telemetry.recordCompaction();
+    workingSetState = undefined;
     pressureState = undefined;
     reconcileAfterCompaction = true;
   });
@@ -165,8 +169,25 @@ export default function (pi: ExtensionAPI) {
       retirePlan(planForIds(registry, absentIds, "compacted out of live context"), true);
     }
 
+    let retiredTokensThisPass = 0;
+    const activeTokensBeforeWorkingSet = registry.summary().activeTokens;
+    if (shouldRunWorkingSetSweep(activeTokensBeforeWorkingSet, config, workingSetState)) {
+      const workingSet = workingSetRetirementPlan(registry, config, { preserve });
+      const before = registry.summary().activeTokens;
+      retirePlan(workingSet, true, "long-horizon working-set sweep");
+      const retiredTokens = Math.max(0, before - registry.summary().activeTokens);
+      retiredTokensThisPass += retiredTokens;
+      if (workingSet.estimatedSavings >= workingSet.targetSavings || !hasUnseenPresentResult) {
+        workingSetState = { activeTokens: activeTokensBeforeWorkingSet };
+      }
+    }
+    if (registry.summary().activeTokens < config.workingSet.triggerTokens) {
+      workingSetState = undefined;
+    }
+
     if (shouldRunPressureSweep(usage, config, pressureState)) {
-      const pressure = pressureRetirementPlan(registry, usage, config, { preserve });
+      const pressureUsage = usageAfterRetirement(usage, retiredTokensThisPass);
+      const pressure = pressureRetirementPlan(registry, pressureUsage, config, { preserve });
       retirePlan(pressure, true, "pressure safety sweep");
       if (pressure.estimatedSavings >= pressure.targetSavings || !hasUnseenPresentResult) {
         pressureState = {
@@ -181,7 +202,7 @@ export default function (pi: ExtensionAPI) {
       pressureState = undefined;
     }
 
-    // A result becomes pressure-eligible only after one provider pass.
+    // A result becomes retirement-eligible only after one provider pass.
     for (const toolCallId of presentToolCallIds) registry.markSeenByToolCallId(toolCallId);
 
     const rewritten = rewriteRetiredExchanges(originalMessages, registry);
@@ -232,7 +253,7 @@ function registerCommands(
   persistActions: (actions: StateDeltaAction[]) => void,
 ): void {
   pi.registerCommand("prune-status", {
-    description: "Show pressure safety-rail and tracked tool output status",
+    description: "Show long-horizon working-set and tracked tool output status",
     async handler(_args, ctx) {
       notify(ctx, renderStatus(registry, getUsage(ctx), config));
     },
@@ -641,6 +662,19 @@ function withProviderEstimateFloor(
     tokens,
     contextWindow: usage.contextWindow,
     percent: (tokens / usage.contextWindow) * 100,
+  };
+}
+
+function usageAfterRetirement(
+  usage: ContextUsage | null | undefined,
+  retiredTokens: number,
+): ContextUsage | null | undefined {
+  if (!usage || usage.tokens == null || retiredTokens <= 0) return usage;
+  const tokens = Math.max(0, usage.tokens - retiredTokens);
+  return {
+    ...usage,
+    tokens,
+    percent: usage.contextWindow ? (tokens / usage.contextWindow) * 100 : usage.percent,
   };
 }
 

@@ -121,10 +121,17 @@ export type PruneChunksConfig = {
     minChunkTokens: number;
     maxSummaryChars: number;
   };
+  workingSet: {
+    triggerTokens: number;
+    targetTokens: number;
+    retryAfterGrowthTokens: number;
+  };
   pressure: {
     triggerPercent: number;
     targetPercent: number;
     retryAfterGrowthTokens: number;
+  };
+  retention: {
     preserveRecentResults: number;
     preserveRecentMinutes: number;
   };
