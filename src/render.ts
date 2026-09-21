@@ -60,6 +60,8 @@ export function renderStatus(
   registry: ChunkRegistry,
   usage: ContextUsage | null | undefined,
   config: PruneChunksConfig,
+  settingsSource?: string,
+  settingsError?: string,
 ): string {
   const summary = registry.summary();
   const percent = contextPercent(usage);
@@ -73,6 +75,13 @@ export function renderStatus(
     `Tracked: ${summary.totalChunks}; retired: ${summary.prunedChunks} (~${summary.prunedTokens}t)`,
     `Long-horizon working set: trigger ~${config.workingSet.triggerTokens}t, target ~${config.workingSet.targetTokens}t`,
     `Emergency pressure rail: trigger ${config.pressure.triggerPercent}%, target ${config.pressure.targetPercent}%`,
+    `Effective settings: ${settingsSource ?? "defaults"}`,
+    ...(settingsError
+      ? [
+          `Configuration error: ${settingsError}`,
+          "Pruning policy disabled until settings are valid",
+        ]
+      : []),
     `Pi owns conversation compaction; retired tool output remains recoverable`,
   ].join("\n");
 }

@@ -28,12 +28,23 @@ initiated compaction.
 
 ## Legacy configuration
 
-v0.1 profiles and percentage/tombstone policy keys fail startup with a migration
-message. Silent reinterpretation would make a breaking policy change difficult
-to diagnose.
+Legacy policy keys and malformed nested settings disable pruning with an explicit
+lifecycle warning and `/prune-status` error. The extension remains loaded so the
+user can inspect the failure and recover after fixing settings and reloading.
+Cache initialization failures use the same path. Project overrides are resolved
+before disk storage is touched.
 
 ## Source rehydration
 
 If memory and disk content are unavailable, bounded file reads can be restored
 from recorded line ranges. An available mtime mismatch returns `source_changed`
 rather than presenting new bytes as the original output.
+
+## Thinking history
+
+Tool-call pairing alone does not preserve signed thinking. New retirement and
+validation rewrites pause for active reasoning models, prefix-bound effort models,
+or replayed thinking blocks. Manual prune/restore mutations are blocked too.
+Already-persisted retirement projections remain stable. This does not repair a
+prefix invalidated by an earlier version or another extension; start a new session
+when upgrading previously rewritten thinking histories.

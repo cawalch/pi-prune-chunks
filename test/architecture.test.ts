@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test, { describe } from "node:test";
+import test, { afterEach, describe } from "node:test";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import extension, { preserveContext } from "../index";
 import { collectToolResult } from "../src/collector";
 import { mergeConfig } from "../src/config";
@@ -18,6 +20,15 @@ import { ChunkRegistry } from "../src/registry";
 import { restoreChunks } from "../src/restorer";
 import { rewriteRetiredExchanges } from "../src/tombstones";
 import type { ContentBlock, ContextChunk, ContextUsage, PruneChunksConfig } from "../src/types";
+
+const harnessDirectories: string[] = [];
+const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+afterEach(() => {
+  for (const directory of harnessDirectories.splice(0))
+    rmSync(directory, { recursive: true, force: true });
+  if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+});
 
 function textBlock(text: string): ContentBlock[] {
   return [{ type: "text", text }];
@@ -134,6 +145,28 @@ describe("v0.4 configuration", () => {
         /v0\.4 no longer supports.*configure workingSet.*pressure.*restore/,
       );
     }
+  });
+
+  test("rejects malformed external nested settings before tool handling", () => {
+    for (const invalid of [
+      { trackTools: {} },
+      { trackTools: [1] },
+      { enabled: "false" },
+      { track: [] },
+      { track: null },
+      { workingSet: "small" },
+      { pressure: { triggerPercent: "90" } },
+      { retention: { preserveRecentResults: 1.5 } },
+      { workingSet: { retryAfterGrowthTokens: Number.NaN } },
+      { restore: { diskCache: { maxBytes: Number.POSITIVE_INFINITY } } },
+      { restore: { diskCache: { directory: "" } } },
+      { restore: { memory: "yes" } },
+      { contextGuards: { compactFailedToolValidation: 1 } },
+    ])
+      assert.throws(() => mergeConfig(invalid as any), /pruneChunks\./);
+    assert.doesNotThrow(() =>
+      mergeConfig({ retention: { preserveRecentMinutes: 0.5 }, restore: { diskCache: false } }),
+    );
   });
 
   test("validates pressure percentages", () => {
@@ -499,6 +532,362 @@ describe("extension integration", () => {
     ]);
     assert.equal(app.commands.has("prune-profile"), false);
     assert.equal(app.handlers.session_before_compact, undefined);
+    assert.equal(typeof app.handlers.session_tree, "function");
+  });
+
+  test("loads configured pressure from agent-dir settings without pi.config/pi.settings", async () => {
+    const app = createHarness({
+      pressure: { triggerPercent: 60, targetPercent: 50, retryAfterGrowthTokens: 100 },
+    });
+    await app.commands.get("prune-status")?.handler("", app.context(1_000, 32_000));
+    const status = app.notifications.at(-1) ?? "";
+    assert.match(status, /Emergency pressure rail: trigger 60%, target 50%/);
+    assert.doesNotMatch(status, /trigger 90%, target 80%/);
+    assert.match(status, /Effective settings: global /);
+  });
+
+  test("retains default pressure when no pruneChunks settings are configured", async () => {
+    const app = createHarness(undefined, { writeGlobalPruneChunks: false });
+    await app.commands.get("prune-status")?.handler("", app.context(1_000, 32_000));
+    assert.match(
+      app.notifications.at(-1) ?? "",
+      /Emergency pressure rail: trigger 90%, target 80%/,
+    );
+  });
+
+  test("applies project pruneChunks only for trusted projects", async () => {
+    const global = { pressure: { triggerPercent: 70, targetPercent: 60 } };
+    const project = { pressure: { triggerPercent: 55, targetPercent: 40 } };
+
+    const untrusted = createHarness(global, { projectSettings: project, projectTrusted: false });
+    await untrusted.handlers.session_start?.({}, untrusted.context(1_000, 32_000));
+    await untrusted.commands.get("prune-status")?.handler("", untrusted.context(1_000, 32_000));
+    assert.match(untrusted.notifications.at(-1) ?? "", /trigger 70%, target 60%/);
+
+    const trusted = createHarness(global, { projectSettings: project, projectTrusted: true });
+    await trusted.handlers.session_start?.({}, trusted.context(1_000, 32_000));
+    await trusted.commands.get("prune-status")?.handler("", trusted.context(1_000, 32_000));
+    const status = trusted.notifications.at(-1) ?? "";
+    assert.match(status, /trigger 55%, target 40%/);
+    assert.match(status, /Effective settings: global .*; project /);
+  });
+
+  test("uses supported SDK settings path exports", async () => {
+    const global = { pressure: { triggerPercent: 70, targetPercent: 60 } };
+    const project = { pressure: { triggerPercent: 55, targetPercent: 40 } };
+    const legacyProject = { pressure: { triggerPercent: 50, targetPercent: 30 } };
+    const app = createHarness(global, {
+      legacyProjectSettings: legacyProject,
+      projectSettings: project,
+      projectTrusted: true,
+    });
+
+    assert.equal(getAgentDir(), app.agentDir);
+    assert.equal(app.projectSettingsPath, path.join(app.cwd, CONFIG_DIR_NAME, "settings.json"));
+    await app.handlers.session_start?.({}, app.context(1_000, 32_000));
+    await app.commands.get("prune-status")?.handler("", app.context(1_000, 32_000));
+    const status = app.notifications.at(-1) ?? "";
+    assert.match(status, /trigger 55%, target 40%/);
+    assert.doesNotMatch(status, /trigger 50%, target 30%/);
+  });
+
+  test("reports invalid configured pruneChunks settings explicitly", async () => {
+    const app = createHarness({
+      pressure: { triggerPercent: 50, targetPercent: 60 },
+    });
+    await app.commands.get("prune-status")?.handler("", app.context(1_000, 32_000));
+    const status = app.notifications.at(-1) ?? "";
+    assert.match(status, /Configuration error:/);
+    assert.match(status, /0 < targetPercent < triggerPercent <= 100/);
+    assert.match(status, /Pruning policy disabled until settings are valid/);
+  });
+
+  test("configuration refresh failures fail closed on startup and recover on tree refresh", async () => {
+    const app = createHarness(
+      {
+        pressure: { triggerPercent: 90, targetPercent: 80, retryAfterGrowthTokens: 100 },
+        retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+      },
+      { projectTrusted: true },
+    );
+    app.writeRawProjectSettings("{");
+    await assert.doesNotReject(async () => {
+      await app.handlers.session_start?.({}, app.context(900, 1_000));
+    });
+
+    const output = "src/stale.ts:1: stale hit\n".repeat(100);
+    const live = [assistant([{ id: "fail-closed" }]), result("fail-closed", output)];
+    await app.handlers.tool_result?.(
+      { toolCallId: "fail-closed", toolName: "rg", content: textBlock(output) },
+      {},
+    );
+    assert.equal(
+      await app.handlers.context?.({ messages: live }, app.context(900, 1_000)),
+      undefined,
+    );
+    assert.equal(app.entries.length, 0);
+    await app.commands.get("prune-status")?.handler("", app.context(900, 1_000));
+    assert.match(app.notifications.at(-1) ?? "", /Configuration error:/);
+
+    app.writeProjectSettings({ pressure: { triggerPercent: 55, targetPercent: 40 } });
+    await assert.doesNotReject(async () => {
+      await app.handlers.session_tree?.({}, app.context(900, 1_000));
+    });
+    await app.commands.get("prune-status")?.handler("", app.context(900, 1_000));
+    const recovered = app.notifications.at(-1) ?? "";
+    assert.match(recovered, /trigger 55%, target 40%/);
+    assert.doesNotMatch(recovered, /Configuration error:/);
+  });
+
+  test("trusted project disk-cache disablement reconfigures initial global storage", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "pi-prune-overlay-cache-"));
+    try {
+      const app = createHarness(
+        {
+          restore: {
+            diskCache: {
+              enabled: true,
+              directory,
+              maxBytes: 100 * 1024 * 1024,
+              maxAgeDays: 14,
+              maxBlobBytes: 1024 * 1024,
+            },
+          },
+          track: { minChunkTokens: 1 },
+        },
+        { projectSettings: { restore: { diskCache: false } }, projectTrusted: true },
+      );
+      await app.handlers.session_start?.({}, app.context(1_000, 32_000));
+      const output = "src/overlay.ts:1: result\n".repeat(20);
+      await app.handlers.tool_result?.(
+        { toolCallId: "overlay-disk-off", toolName: "rg", content: textBlock(output) },
+        {},
+      );
+      await app.commands.get("prune-largest")?.handler("", app.context(1_000, 32_000));
+      const id = /pc_[0-9a-f]{12}/.exec(app.notifications.at(-1) ?? "")?.[0];
+      assert.ok(id);
+      await app.commands.get("prune-now")?.handler(id, app.context(1_000, 32_000));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await assert.rejects(readFile(path.join(directory, "ids", `${id}.json`), "utf8"), /ENOENT/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("session-tree rebuild does not purge durable disk archives", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "pi-prune-archive-survives-"));
+    try {
+      const app = createHarness({
+        restore: {
+          memory: false,
+          diskCache: {
+            enabled: true,
+            directory,
+            maxBytes: 100 * 1024 * 1024,
+            maxAgeDays: 14,
+            maxBlobBytes: 1024 * 1024,
+          },
+          sourceRehydrate: false,
+        },
+        track: { minChunkTokens: 1 },
+      });
+      await app.handlers.session_start?.({}, app.context(1_000, 32_000));
+      const output = "src/archive.ts:1: result\n".repeat(20);
+      await app.handlers.tool_result?.(
+        { toolCallId: "archive-survives", toolName: "rg", content: textBlock(output) },
+        {},
+      );
+      await app.commands.get("prune-largest")?.handler("", app.context(1_000, 32_000));
+      const id = /pc_[0-9a-f]{12}/.exec(app.notifications.at(-1) ?? "")?.[0];
+      assert.ok(id);
+      await app.commands.get("prune-now")?.handler(id, app.context(1_000, 32_000));
+      await waitForFile(path.join(directory, "ids", `${id}.json`));
+
+      const transcript = [
+        {
+          type: "message",
+          timestamp: new Date(Date.now() - 1_000).toISOString(),
+          message: assistant([{ id: "archive-survives", name: "rg" }]),
+        },
+        {
+          type: "message",
+          timestamp: new Date().toISOString(),
+          message: result("archive-survives", output),
+        },
+        ...app.entries,
+      ];
+      await app.handlers.session_tree?.(
+        {},
+        app.context(1_000, 32_000, { branch: transcript, entries: transcript }),
+      );
+      await waitForFile(path.join(directory, "ids", `${id}.json`));
+      await app.commands.get("prune-restore")?.handler(id, app.context(1_000, 32_000));
+      assert.match(app.notifications.at(-1) ?? "", /restored via disk_cache/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("does not touch global disk storage before project overrides apply", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-prune-deferred-cache-"));
+    harnessDirectories.push(root);
+    const blocked = path.join(root, "ordinary-file");
+    writeFileSync(blocked, "not a directory");
+    const app = createHarness(
+      { restore: { diskCache: { directory: blocked } } },
+      {
+        projectSettings: { restore: { diskCache: false } },
+        projectTrusted: true,
+      },
+    );
+    await app.handlers.session_start({}, app.context(100, 32_000));
+    await app.commands.get("prune-status").handler("", app.context(100, 32_000));
+    assert.doesNotMatch(app.notifications.at(-1) ?? "", /Configuration error/);
+    assert.equal(existsSync(path.join(blocked, "blobs")), false);
+  });
+
+  test("reenabling pruning initializes storage after a disabled startup", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-prune-reenable-"));
+    harnessDirectories.push(root);
+    const directory = path.join(root, "cache");
+    const app = createHarness({ enabled: false, restore: { diskCache: { directory } } });
+    await app.handlers.session_start({}, app.context(100, 32_000));
+    assert.equal(existsSync(directory), false);
+    app.writeGlobalSettings({ enabled: true, restore: { diskCache: { directory } } });
+    await app.handlers.session_tree({}, app.context(100, 32_000));
+    assert.equal(existsSync(path.join(directory, "blobs")), true);
+    await app.handlers.session_shutdown({}, {});
+  });
+
+  test("cache initialization failures disable pruning visibly and recover", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-prune-bad-cache-"));
+    harnessDirectories.push(root);
+    const blocked = path.join(root, "ordinary-file");
+    writeFileSync(blocked, "not a directory");
+    const app = createHarness({ restore: { diskCache: { directory: blocked } } });
+    await app.handlers.session_start({}, app.context(100, 32_000));
+    assert.match(app.notifications.at(-1) ?? "", /disabled: Cannot initialize.*cache/);
+    app.writeGlobalSettings({ restore: { diskCache: false } });
+    await app.handlers.session_tree({}, app.context(100, 32_000));
+    await app.commands.get("prune-status").handler("", app.context(100, 32_000));
+    assert.doesNotMatch(app.notifications.at(-1) ?? "", /Configuration error/);
+  });
+
+  test("invalid nested settings produce a startup warning and no tool-result exception", async () => {
+    const app = createHarness({ trackTools: { bad: true } } as any);
+    await app.handlers.session_start({}, app.context(100, 32_000));
+    assert.match(
+      app.notifications.at(-1) ?? "",
+      /disabled:.*trackTools must be an array of strings/,
+    );
+    await app.handlers.tool_result(
+      { toolCallId: "bad", toolName: "read", content: textBlock("x".repeat(2000)) },
+      {},
+    );
+    assert.equal(
+      await app.handlers.context({ messages: [] }, app.context(99_000, 100_000)),
+      undefined,
+    );
+  });
+
+  test("thinking-capable sessions never start pruning or validation rewrites", async () => {
+    const app = createHarness({
+      retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+    });
+    const ctx = {
+      ...app.context(99_000, 100_000),
+      model: { reasoning: true },
+      thinkingLevel: "high",
+    };
+    const output = "src/stale.ts:1: hit\n".repeat(200);
+    await app.handlers.tool_result(
+      { toolCallId: "thinking", toolName: "rg", content: textBlock(output) },
+      {},
+    );
+    const messages = [
+      assistant([{ id: "thinking" }]),
+      result("thinking", output),
+      { role: "user", content: textBlock(`Tool call arguments for "read": ${"x".repeat(4000)}`) },
+    ];
+    const snapshot = structuredClone(messages);
+    for (let i = 0; i < 3; i++)
+      assert.equal(await app.handlers.context({ messages }, ctx), undefined);
+    assert.deepEqual(messages, snapshot);
+    assert.equal(app.entries.length, 0);
+    await app.commands.get("prune-now").handler("", ctx);
+    assert.match(app.notifications.at(-1) ?? "", /Pruning paused/);
+    await app.commands.get("prune-restore").handler("pc_0123456789ab", ctx);
+    assert.match(app.notifications.at(-1) ?? "", /Restore paused/);
+  });
+
+  test("prefix-bound models remain protected with thinking off; ordinary off sessions prune", async () => {
+    for (const prefixBound of [false, true]) {
+      const app = createHarness({
+        retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+      });
+      const ctx = {
+        ...app.context(99_000, 100_000),
+        model: { reasoning: true, compat: { supportsMidConvoEffort: prefixBound } },
+        thinkingLevel: "off",
+      };
+      const output = "src/old.ts:1: hit\n".repeat(200);
+      await app.handlers.tool_result(
+        { toolCallId: "off-mode", toolName: "rg", content: textBlock(output) },
+        {},
+      );
+      const messages = [assistant([{ id: "off-mode" }]), result("off-mode", output)];
+      await app.handlers.context({ messages }, ctx);
+      const rewritten = await app.handlers.context({ messages }, ctx);
+      if (prefixBound) {
+        assert.equal(rewritten, undefined);
+        assert.equal(app.entries.length, 0);
+      } else assert.deepEqual(rewritten.messages, []);
+    }
+  });
+
+  test("resumed signed history is protected without model metadata", async () => {
+    const app = createHarness({
+      retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+    });
+    const messages = [
+      assistant([{ id: "signed-old" }]),
+      result("signed-old", "x".repeat(4000)),
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "reasoning", thinkingSignature: "signed" }],
+      },
+    ];
+    await app.handlers.tool_result(
+      { toolCallId: "signed-old", toolName: "rg", content: textBlock("x".repeat(4000)) },
+      {},
+    );
+    assert.equal(await app.handlers.context({ messages }, app.context(99_000, 100_000)), undefined);
+    assert.equal(app.entries.length, 0);
+  });
+
+  test("freezes existing retirement projection when thinking becomes active", async () => {
+    const app = createHarness({
+      retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+    });
+    const ctx = app.context(99_000, 100_000);
+    const output = "src/old.ts:1: hit\n".repeat(200);
+    await app.handlers.tool_result(
+      { toolCallId: "before-thinking", toolName: "rg", content: textBlock(output) },
+      {},
+    );
+    const messages = [assistant([{ id: "before-thinking" }]), result("before-thinking", output)];
+    await app.handlers.context({ messages }, ctx);
+    const prior = await app.handlers.context({ messages }, ctx);
+    assert.deepEqual(prior.messages, []);
+    const count = app.entries.length;
+    const signed = {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "new", thinkingSignature: "signed" }],
+    };
+    await app.handlers.message_end({ message: signed }, {});
+    const next = await app.handlers.context({ messages: [...messages, signed] }, ctx);
+    assert.deepEqual(next.messages, [signed]);
+    assert.equal(app.entries.length, count);
   });
 
   test("enabled=false makes the provider hook completely inert", async () => {
@@ -673,6 +1062,65 @@ describe("extension integration", () => {
     );
     const transformed = await resumed.handlers.context?.(
       { messages: [assistant([{ id: "resume" }]), result("resume", "src/a.ts:1: hit")] },
+      resumed.context(1_000, 32_000),
+    );
+    assert.deepEqual(transformed?.messages, []);
+  });
+
+  test("rebuilds policy state from the selected branch, not sibling deltas", async () => {
+    const messagesOnly = [
+      {
+        type: "message",
+        id: "call-entry",
+        timestamp: new Date(Date.now() - 1_000).toISOString(),
+        message: assistant([{ id: "shared", name: "rg" }]),
+      },
+      {
+        type: "message",
+        id: "result-entry",
+        timestamp: new Date().toISOString(),
+        message: result("shared", "src/shared.ts:1: still visible"),
+      },
+    ];
+    const probe = createHarness();
+    await probe.handlers.session_start?.(
+      {},
+      probe.context(1_000, 32_000, { branch: messagesOnly, entries: messagesOnly }),
+    );
+    await probe.commands.get("prune-largest")?.handler("", probe.context(1_000, 32_000));
+    const id = /pc_[0-9a-f]{12}/.exec(probe.notifications.at(-1) ?? "")?.[0];
+    assert.ok(id);
+
+    const siblingDelta = {
+      type: "custom",
+      id: "sibling-delta",
+      customType: "prune-chunks-state-v3",
+      data: {
+        version: 3,
+        actions: [{ id, state: "pruned", reason: "sibling branch", timestamp: Date.now() }],
+      },
+    };
+    const allEntries = [...messagesOnly, siblingDelta];
+    const resumed = createHarness();
+    await resumed.handlers.session_start?.(
+      {},
+      resumed.context(1_000, 32_000, { branch: messagesOnly, entries: allEntries }),
+    );
+    const live = [
+      assistant([{ id: "shared" }]),
+      result("shared", "src/shared.ts:1: still visible"),
+    ];
+    assert.equal(
+      await resumed.handlers.context?.({ messages: live }, resumed.context(1_000, 32_000)),
+      undefined,
+    );
+
+    await resumed.handlers.session_tree?.(
+      {},
+      resumed.context(1_000, 32_000, { branch: allEntries, entries: allEntries }),
+    );
+    const transformed = await resumed.handlers.context?.(
+      { messages: live },
       resumed.context(1_000, 32_000),
     );
     assert.deepEqual(transformed?.messages, []);
@@ -886,6 +1334,18 @@ describe("context guards and preservation", () => {
   });
 });
 
+async function waitForFile(filePath: string): Promise<string> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      return await readFile(filePath, "utf8");
+    } catch (error) {
+      if (!(error instanceof Error) || !/ENOENT/.test(error.message)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  return await readFile(filePath, "utf8");
+}
+
 function textFrom(content: unknown): string {
   if (!Array.isArray(content)) return typeof content === "string" ? content : "";
   return content
@@ -893,21 +1353,50 @@ function textFrom(content: unknown): string {
     .join("\n");
 }
 
-function createHarness(overrides: Parameters<typeof mergeConfig>[0] = {}) {
+type HarnessConfig = Parameters<typeof mergeConfig>[0];
+type HarnessOptions = {
+  projectSettings?: HarnessConfig;
+  legacyProjectSettings?: HarnessConfig;
+  projectTrusted?: boolean;
+  writeGlobalPruneChunks?: boolean;
+};
+
+function projectSettingsPath(cwd: string): string {
+  return path.join(cwd, CONFIG_DIR_NAME, "settings.json");
+}
+
+function writeSettingsFile(settingsPath: string, pruneChunks: HarnessConfig): void {
+  mkdirSync(path.dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify({ pruneChunks }), { flag: "w" });
+}
+
+function createHarness(overrides: HarnessConfig = {}, options: HarnessOptions = {}) {
   const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
   const commands = new Map<string, any>();
   const tools: any[] = [];
   const entries: any[] = [];
   const notifications: string[] = [];
   const statuses: string[] = [];
+  const cwd = mkdtempSync(path.join(tmpdir(), "pi-prune-harness-cwd-"));
+  const agentDir = mkdtempSync(path.join(tmpdir(), "pi-prune-harness-agent-"));
+  harnessDirectories.push(cwd, agentDir);
   let compactCalls = 0;
   const raw = {
     track: { minChunkTokens: 1 },
     restore: { diskCache: false },
-    ...overrides,
+    ...(overrides ?? {}),
   };
+  if (options.writeGlobalPruneChunks !== false) {
+    writeSettingsFile(path.join(agentDir, "settings.json"), raw);
+  }
+  if (options.projectSettings) {
+    writeSettingsFile(projectSettingsPath(cwd), options.projectSettings);
+  }
+  if (options.legacyProjectSettings) {
+    writeSettingsFile(path.join(cwd, ".pi", "settings.json"), options.legacyProjectSettings);
+  }
+  process.env.PI_CODING_AGENT_DIR = agentDir;
   const pi = {
-    settings: { pruneChunks: raw },
     on(name: string, handler: (event: any, ctx: any) => Promise<any>) {
       handlers[name] = handler;
     },
@@ -932,9 +1421,34 @@ function createHarness(overrides: Parameters<typeof mergeConfig>[0] = {}) {
     get compactCalls() {
       return compactCalls;
     },
-    context(tokens: number, contextWindow: number) {
+    cwd,
+    agentDir,
+    globalSettingsPath: path.join(agentDir, "settings.json"),
+    projectSettingsPath: projectSettingsPath(cwd),
+    writeGlobalSettings(settings: HarnessConfig) {
+      writeSettingsFile(path.join(agentDir, "settings.json"), settings);
+    },
+    writeProjectSettings(settings: HarnessConfig) {
+      writeSettingsFile(projectSettingsPath(cwd), settings);
+    },
+    writeRawProjectSettings(raw: string) {
+      mkdirSync(path.dirname(projectSettingsPath(cwd)), { recursive: true });
+      writeFileSync(projectSettingsPath(cwd), raw, { flag: "w" });
+    },
+    context(
+      tokens: number,
+      contextWindow: number,
+      session?: { branch?: unknown[]; entries?: unknown[] },
+    ) {
       return {
+        cwd,
         hasUI: true,
+        isProjectTrusted: () => options.projectTrusted === true,
+        sessionManager: {
+          getCwd: () => cwd,
+          getBranch: () => session?.branch ?? session?.entries ?? [],
+          getEntries: () => session?.entries ?? session?.branch ?? [],
+        },
         getContextUsage: () => usage(tokens, contextWindow),
         compact() {
           compactCalls += 1;

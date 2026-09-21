@@ -56,7 +56,7 @@ export class ChunkRegistry {
   private readonly auditEvents: ChunkAuditEvent[] = [];
   private revisionCounter = 0;
 
-  constructor(private readonly cache: ChunkContentCache = new MemoryChunkContentCache()) {}
+  constructor(private cache: ChunkContentCache = new MemoryChunkContentCache()) {}
 
   addCollected(collected: CollectedChunk, now = Date.now()): ContextChunk {
     const existingId = this.toolCallIndex.get(collected.toolCallId);
@@ -474,11 +474,12 @@ export class ChunkRegistry {
     return true;
   }
 
-  reset(): void {
+  reset(cache?: ChunkContentCache): void {
     this.chunks.clear();
     this.toolCallIndex.clear();
     this.auditEvents.length = 0;
-    this.cache.clear();
+    if (cache) this.cache = cache;
+    else this.cache.clear();
     this.revisionCounter = 0;
   }
 

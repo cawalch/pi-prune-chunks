@@ -81,7 +81,8 @@ const LEGACY_KEYS = [
 ] as const;
 
 export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksConfig {
-  if (!input) return structuredClone(DEFAULT_CONFIG);
+  if (input === undefined || input === null) return structuredClone(DEFAULT_CONFIG);
+  validateRawConfig(input);
   const legacy = LEGACY_KEYS.filter((key) => input[key] !== undefined);
   if (legacy.length > 0) {
     throw new Error(
@@ -125,6 +126,58 @@ export function mergeConfig(input?: RawPruneChunksConfig | null): PruneChunksCon
   };
   validateConfig(config);
   return config;
+}
+
+/** Validate external JSON before defaults or object spreading can hide bad values. */
+function validateRawConfig(input: unknown): void {
+  const schema = {
+    ...DEFAULT_CONFIG,
+    pressure: {
+      ...DEFAULT_CONFIG.pressure,
+      preserveRecentResults: 0,
+      preserveRecentMinutes: 0,
+    },
+    restore: {
+      ...DEFAULT_CONFIG.restore,
+      diskCache: { ...DEFAULT_DISK_CACHE_CONFIG, directory: "" },
+    },
+  };
+  validateSettingsObject(input, schema, "pruneChunks");
+}
+
+function validateSettingsObject(
+  input: unknown,
+  schema: Record<string, unknown>,
+  location: string,
+): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(`${location} must be an object`);
+  }
+  const values = input as Record<string, unknown>;
+  for (const [key, expected] of Object.entries(schema)) {
+    const value = values[key];
+    if (value === undefined) continue;
+    const field = `${location}.${key}`;
+    if (field === "pruneChunks.restore.diskCache" && typeof value === "boolean") continue;
+    if (Array.isArray(expected)) {
+      if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+        throw new Error(`${field} must be an array of strings`);
+      }
+    } else if (typeof expected === "object") {
+      validateSettingsObject(value, expected as Record<string, unknown>, field);
+    } else if (typeof expected === "number") {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        throw new Error(`${field} must be a finite non-negative number`);
+      }
+      if (!/(?:Percent|Minutes|Days)$/.test(key) && !Number.isSafeInteger(value)) {
+        throw new Error(`${field} must be a non-negative safe integer`);
+      }
+    } else if (typeof value !== typeof expected) {
+      throw new Error(`${field} must be a ${typeof expected}`);
+    } else if (key === "directory" && (value as string).trim().length === 0) {
+      throw new Error(`${field} must be a non-empty path`);
+    }
+  }
 }
 
 function mergeDiskCacheConfig(input: RawDiskCacheConfig): DiskCacheConfig {
