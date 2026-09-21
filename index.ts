@@ -440,23 +440,27 @@ function registerCommands(
   });
 }
 
-/** Conservative guard: never start rewriting a thinking-capable model's prefix. */
+/** Reasoning capability alone does not imply a signed or prefix-bound history. */
 function protectsThinkingPrefix(ctx: unknown, messages: unknown[]): boolean {
   const context = ctx as
     | {
-        thinkingLevel?: string;
-        model?: { reasoning?: boolean; compat?: { supportsMidConvoEffort?: boolean } };
+        model?: { compat?: { supportsMidConvoEffort?: boolean } };
       }
     | undefined;
   if (context?.model?.compat?.supportsMidConvoEffort === true) return true;
-  if (context?.model?.reasoning === true && context.thinkingLevel !== "off") return true;
   return messages.some((message) => {
     const candidate = message as { role?: string; content?: ContentBlock[] } | undefined;
     return (
       candidate?.role === "assistant" &&
       Array.isArray(candidate.content) &&
       candidate.content.some(
-        (block) => block.type === "thinking" || block.type === "redacted_thinking",
+        (block) =>
+          block.type === "redacted_thinking" ||
+          (block.type === "thinking" &&
+            (block.redacted === true ||
+              [block.thinkingSignature, block.signature].some(
+                (signature) => typeof signature === "string" && signature.trim().length > 0,
+              ))),
       )
     );
   });

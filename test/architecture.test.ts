@@ -790,13 +790,13 @@ describe("extension integration", () => {
     );
   });
 
-  test("thinking-capable sessions never start pruning or validation rewrites", async () => {
+  test("prefix-bound sessions never start pruning or validation rewrites", async () => {
     const app = createHarness({
       retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
     });
     const ctx = {
       ...app.context(99_000, 100_000),
-      model: { reasoning: true },
+      model: { reasoning: true, compat: { supportsMidConvoEffort: true } },
       thinkingLevel: "high",
     };
     const output = "src/stale.ts:1: hit\n".repeat(200);
@@ -842,6 +842,116 @@ describe("extension integration", () => {
         assert.equal(rewritten, undefined);
         assert.equal(app.entries.length, 0);
       } else assert.deepEqual(rewritten.messages, []);
+    }
+  });
+
+  test("local reasoning with unsigned history prunes at the default working-set gate in a 164k window", async () => {
+    for (const thinkingLevel of ["high", undefined]) {
+      const app = createHarness();
+      const messages: Array<{
+        role: string;
+        content: ContentBlock[];
+        toolCallId?: string;
+        toolName?: string;
+      }> = [];
+      for (let index = 0; index < 14; index++) {
+        const id = `local-${index}`;
+        const call = assistant([{ id }]);
+        call.content.unshift({
+          type: "thinking",
+          thinking: "Inspecting search results",
+          thinkingSignature: "",
+        } as any);
+        messages.push(call, result(id, `src/file-${index}.ts:1: hit\n${"x".repeat(10_000)}`));
+      }
+      const branch = messages.map((message, index) => ({
+        type: "message",
+        id: `entry-${index}`,
+        timestamp: new Date(Date.now() - 600_000 + index).toISOString(),
+        message,
+      }));
+      const ctx = {
+        ...app.context(60_000, 164_000, { branch }),
+        model: {
+          id: "swift-qwen3.8",
+          api: "openai-completions",
+          provider: "local",
+          reasoning: true,
+        },
+        thinkingLevel,
+      };
+      await app.handlers.session_start({}, ctx);
+      await app.handlers.message_end(
+        {
+          message: {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "Continue", thinkingSignature: "  " }],
+          },
+        },
+        ctx,
+      );
+      const snapshot = structuredClone(messages);
+      const rewritten = await app.handlers.context({ messages }, ctx);
+      assert.ok(
+        rewritten,
+        "unsigned local reasoning must allow working-set retirement below pressure",
+      );
+      assert.deepEqual(messages, snapshot);
+      const remainingResults = rewritten.messages.filter(
+        (message: any) => message.role === "toolResult",
+      );
+      assert.ok(remainingResults.length < 14);
+      for (let index = 8; index < 14; index++)
+        assert.ok(remainingResults.some((message: any) => message.toolCallId === `local-${index}`));
+      assert.ok(
+        app.entries.some((entry) =>
+          entry.data.actions.some(
+            (action: any) => action.reason === "long-horizon working-set sweep",
+          ),
+        ),
+      );
+      assert.equal(app.compactCalls, 0);
+      await app.commands.get("prune-status").handler("", ctx);
+      assert.doesNotMatch(app.notifications.at(-1) ?? "", /Pruning paused/);
+      // Commands must also accept the resumed branch's unsigned thinking blocks.
+      await app.commands.get("prune-largest").handler("", ctx);
+      const id = /pc_[0-9a-f]{12}/.exec(app.notifications.at(-1) ?? "")?.[0];
+      assert.ok(id);
+      await app.commands.get("prune-now").handler(id, ctx);
+      assert.doesNotMatch(app.notifications.at(-1) ?? "", /Pruning paused/);
+      await app.commands.get("prune-restore").handler(id, ctx);
+      assert.match(app.notifications.at(-1) ?? "", /restored via/);
+    }
+  });
+
+  test("native signatures and redacted thinking retain the history guard", async () => {
+    for (const block of [
+      { type: "thinking", thinking: "bound", signature: "native-signature" },
+      {
+        type: "thinking",
+        thinking: "[Reasoning redacted]",
+        redacted: true,
+        thinkingSignature: "opaque",
+      },
+      { type: "redacted_thinking", data: "opaque" },
+    ]) {
+      const app = createHarness({
+        retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+      });
+      await app.handlers.tool_result(
+        { toolCallId: "protected", toolName: "rg", content: textBlock("x".repeat(4000)) },
+        {},
+      );
+      const messages = [
+        assistant([{ id: "protected" }]),
+        result("protected", "x".repeat(4000)),
+        { role: "assistant", content: [block] },
+      ];
+      assert.equal(
+        await app.handlers.context({ messages }, app.context(99_000, 100_000)),
+        undefined,
+      );
+      assert.equal(app.entries.length, 0);
     }
   });
 
