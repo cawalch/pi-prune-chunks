@@ -60,7 +60,7 @@ export default function (pi: ExtensionAPI) {
   let pressureState: PressureSweepState | undefined;
   let pendingProviderRewrite = false;
   let reconcileAfterCompaction = false;
-  let signedHistory = false;
+  let protectedHistoryReason: string | undefined;
 
   async function refreshLifecycleConfig(ctx?: unknown): Promise<boolean> {
     let next = loadConfig(ctx);
@@ -94,7 +94,7 @@ export default function (pi: ExtensionAPI) {
     pressureState = undefined;
     pendingProviderRewrite = false;
     reconcileAfterCompaction = false;
-    signedHistory = false;
+    protectedHistoryReason = undefined;
   }
 
   function persistActions(actions: StateDeltaAction[]): void {
@@ -191,14 +191,13 @@ export default function (pi: ExtensionAPI) {
     if (!config.enabled) return;
     const startedAt = performance.now();
     const originalMessages = event.messages ?? [];
-    signedHistory ||= protectsThinkingPrefix(ctx, originalMessages);
-    if (signedHistory) {
+    protectedHistoryReason ||= thinkingProtectionReason(ctx, originalMessages);
+    if (protectedHistoryReason) {
       // Keep persisted retirements stable: resurrecting earlier output can also
       // invalidate signatures produced against the already-pruned projection.
       const rewritten = rewriteRetiredExchanges(originalMessages, registry);
       pendingProviderRewrite = rewritten.modified;
-      if (ctx?.hasUI)
-        ctx.ui.setStatus("prune-chunks", "Pruning paused: protected thinking history");
+      if (ctx?.hasUI) ctx.ui.setStatus("prune-chunks", `Pruning paused: ${protectedHistoryReason}`);
       return rewritten.modified ? { messages: rewritten.messages } : undefined;
     }
     const reportedUsage = getUsage(ctx);
@@ -276,8 +275,8 @@ export default function (pi: ExtensionAPI) {
     if (modified) return { messages: guarded.messages };
   });
 
-  pi.on("message_end", async (event) => {
-    signedHistory ||= protectsThinkingPrefix(undefined, [event.message]);
+  pi.on("message_end", async (event, ctx) => {
+    protectedHistoryReason ||= thinkingProtectionReason(ctx, [event.message]);
     const providerUsage = assistantProviderUsage(event);
     if (!providerUsage) return;
     telemetry.recordProviderResponse(providerUsage, pendingProviderRewrite);
@@ -291,8 +290,8 @@ export default function (pi: ExtensionAPI) {
     () => configSource,
     () => configError,
     (ctx) =>
-      signedHistory ||
-      protectsThinkingPrefix(
+      protectedHistoryReason ||
+      thinkingProtectionReason(
         ctx,
         currentBranchEntries(ctx).map((entry) => (entry as { message?: unknown }).message),
       ),
@@ -308,7 +307,7 @@ function registerCommands(
   getConfig: () => PruneChunksConfig,
   getConfigSource: () => string,
   getConfigError: () => string | undefined,
-  historyProtected: (ctx: unknown) => boolean,
+  historyProtected: (ctx: unknown) => string | undefined,
   telemetry: TelemetryRecorder,
   retirePlan: (
     plan: RetirementPlan,
@@ -320,11 +319,12 @@ function registerCommands(
   pi.registerCommand("prune-status", {
     description: "Show long-horizon working-set and tracked tool output status",
     async handler(_args, ctx) {
+      const protectionReason = historyProtected(ctx);
       notify(
         ctx,
         [
           renderStatus(registry, getUsage(ctx), getConfig(), getConfigSource(), getConfigError()),
-          ...(historyProtected(ctx) ? ["Pruning paused: protected thinking history"] : []),
+          ...(protectionReason ? [`Pruning paused: ${protectionReason}`] : []),
         ].join("\n"),
       );
     },
@@ -440,30 +440,43 @@ function registerCommands(
   });
 }
 
-/** Reasoning capability alone does not imply a signed or prefix-bound history. */
-function protectsThinkingPrefix(ctx: unknown, messages: unknown[]): boolean {
+// Pi uses these literal field names as replay metadata, not signed thinking.
+const OPENAI_REASONING_FIELDS = new Set(["reasoning_content", "reasoning", "reasoning_text"]);
+
+function thinkingProtectionReason(ctx: unknown, messages: unknown[]): string | undefined {
   const context = ctx as
-    | {
-        model?: { compat?: { supportsMidConvoEffort?: boolean } };
-      }
+    | { model?: { api?: string; compat?: { supportsMidConvoEffort?: boolean } } }
     | undefined;
-  if (context?.model?.compat?.supportsMidConvoEffort === true) return true;
-  return messages.some((message) => {
-    const candidate = message as { role?: string; content?: ContentBlock[] } | undefined;
-    return (
-      candidate?.role === "assistant" &&
-      Array.isArray(candidate.content) &&
-      candidate.content.some(
-        (block) =>
-          block.type === "redacted_thinking" ||
-          (block.type === "thinking" &&
-            (block.redacted === true ||
-              [block.thinkingSignature, block.signature].some(
-                (signature) => typeof signature === "string" && signature.trim().length > 0,
-              ))),
-      )
-    );
-  });
+  if (context?.model?.compat?.supportsMidConvoEffort === true) {
+    return "model declares prefix binding (supportsMidConvoEffort)";
+  }
+  for (const message of messages) {
+    const candidate = message as
+      | { role?: string; api?: string; content?: ContentBlock[] }
+      | undefined;
+    if (candidate?.role !== "assistant" || !Array.isArray(candidate.content)) continue;
+    // The message's original API takes precedence after model switches.
+    const api = candidate.api ?? context?.model?.api;
+    for (const block of candidate.content) {
+      if (
+        block.type === "redacted_thinking" ||
+        (block.type === "thinking" && block.redacted === true)
+      ) {
+        return "redacted thinking history";
+      }
+      if (block.type !== "thinking") continue;
+      if (nonEmptyString(block.signature)) return "signed thinking history (signature)";
+      if (!nonEmptyString(block.thinkingSignature)) continue;
+      if (api === "openai-completions" && OPENAI_REASONING_FIELDS.has(block.thinkingSignature))
+        continue;
+      return "signed thinking history (thinkingSignature)";
+    }
+  }
+  return undefined;
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function createContentCache(config: PruneChunksConfig) {

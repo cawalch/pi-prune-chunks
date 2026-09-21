@@ -54,3 +54,16 @@ The existing `npm run bench:churn` now loads isolated settings through the same
 file-based configuration path as the extension. `bench:replay` and `bench:cache`
 remain deterministic component checks; none of these establish live task-quality
 or signed-thinking retention benefits.
+
+To additionally exercise Pi's real OpenAI Chat Completions response parser, pass
+its installed adapter path as the second argument:
+
+```bash
+npm run test:sdk -- /path/to/pi-coding-agent/dist/index.js /path/to/pi-ai/dist/api/openai-completions.js
+```
+
+The smoke injects mocked SSE responses through Pi's `fetch` option, verifies the
+three reasoning-field markers produced by the adapter, and passes those actual
+messages through the extension's message-end and context hooks. No network or
+provider calls occur. This guards against confusing replay metadata in
+`thinkingSignature` with cryptographic signatures.
