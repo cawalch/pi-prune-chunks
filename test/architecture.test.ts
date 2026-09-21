@@ -924,6 +924,63 @@ describe("extension integration", () => {
     }
   });
 
+  test("OpenAI reasoning field markers do not latch a pause on message_end or resume", async () => {
+    for (const marker of ["reasoning_content", "reasoning", "reasoning_text"]) {
+      const app = createHarness({
+        retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+      });
+      const thinking = {
+        role: "assistant",
+        api: "openai-completions",
+        content: [{ type: "thinking", thinking: "Plan", thinkingSignature: marker }],
+      };
+      const ctx = {
+        ...app.context(99_000, 100_000, { branch: [{ type: "message", message: thinking }] }),
+        model: { api: "openai-completions", reasoning: true },
+        thinkingLevel: "high",
+      };
+      await app.handlers.message_end({ message: thinking }, ctx);
+      const output = "src/local.ts:1: hit\n".repeat(200);
+      await app.handlers.tool_result(
+        { toolCallId: "marker", toolName: "rg", content: textBlock(output) },
+        ctx,
+      );
+      const messages = [assistant([{ id: "marker" }]), result("marker", output), thinking];
+      await app.handlers.context({ messages }, ctx);
+      const rewritten = await app.handlers.context({ messages }, ctx);
+      assert.deepEqual(rewritten.messages, [thinking]);
+      await app.commands.get("prune-status").handler("", ctx);
+      assert.doesNotMatch(app.notifications.at(-1) ?? "", /Pruning paused/);
+    }
+  });
+
+  test("opaque signatures and markers from other APIs stay protected with an explicit reason", async () => {
+    for (const [api, signature] of [
+      ["openai-completions", "opaque-signature"],
+      ["anthropic-messages", "reasoning_content"],
+      [undefined, "reasoning_content"],
+    ]) {
+      const app = createHarness();
+      const message = {
+        role: "assistant",
+        api,
+        content: [{ type: "thinking", thinking: "bound", thinkingSignature: signature }],
+      };
+      const ctx = {
+        ...app.context(99_000, 100_000),
+        ...(api ? { model: { api: "openai-completions" } } : {}),
+      };
+      await app.handlers.message_end({ message }, ctx);
+      await app.handlers.context({ messages: [message] }, ctx);
+      assert.match(
+        app.statuses.at(-1) ?? "",
+        /Pruning paused: signed thinking history \(thinkingSignature\)/,
+      );
+      await app.commands.get("prune-status").handler("", ctx);
+      assert.match(app.notifications.at(-1) ?? "", /signed thinking history \(thinkingSignature\)/);
+    }
+  });
+
   test("native signatures and redacted thinking retain the history guard", async () => {
     for (const block of [
       { type: "thinking", thinking: "bound", signature: "native-signature" },

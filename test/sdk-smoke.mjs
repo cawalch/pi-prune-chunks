@@ -1,4 +1,4 @@
-// Usage: node test/sdk-smoke.mjs /path/to/pi-coding-agent/dist/index.js
+// Usage: node test/sdk-smoke.mjs /path/to/pi-coding-agent/dist/index.js [openai-completions.js]
 // Loads the real SDK without credentials, provider requests, or user settings.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -29,10 +29,13 @@ async function load() {
   const result = await sdk.discoverAndLoadExtensions([extensionPath], cwd, agentDir);
   assert.deepEqual(result.errors, []);
   assert.equal(result.extensions.length, 1);
+  result.runtime.appendEntry = () => {};
   return result.extensions[0];
 }
 async function emit(extension, name, event = {}) {
-  for (const handler of extension.handlers.get(name) ?? []) await handler(event, ctx);
+  let result;
+  for (const handler of extension.handlers.get(name) ?? []) result = await handler(event, ctx);
+  return result;
 }
 try {
   mkdirSync(agentDir, { recursive: true });
@@ -82,6 +85,86 @@ try {
   await extension.commands.get("prune-status").handler("", ctx);
   assert.doesNotMatch(notifications.pop(), /Configuration error/);
   await emit(extension, "session_shutdown");
+  if (process.argv[3]) {
+    const { stream } = await import(pathToFileURL(path.resolve(process.argv[3])).href);
+    const model = {
+      id: "swift-qwen3.8",
+      name: "local fixture",
+      api: "openai-completions",
+      provider: "local",
+      baseUrl: "http://unused.invalid/v1",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 164_000,
+      maxTokens: 4096,
+    };
+    for (const marker of ["reasoning_content", "reasoning", "reasoning_text"]) {
+      const chunks = [
+        { delta: { role: "assistant", [marker]: "Plan" }, finish_reason: null },
+        { delta: { content: "Done" }, finish_reason: "stop" },
+      ];
+      const sse = `${chunks
+        .map(
+          (choice) =>
+            `data: ${JSON.stringify({
+              id: "fixture",
+              object: "chat.completion.chunk",
+              created: 1,
+              model: model.id,
+              choices: [{ index: 0, ...choice }],
+            })}\n\n`,
+        )
+        .join("")}data: [DONE]\n\n`;
+      let requests = 0;
+      const thinking = await stream(
+        model,
+        { messages: [{ role: "user", content: "test", timestamp: 1 }] },
+        {
+          apiKey: "fixture-only",
+          fetch: async () => {
+            requests++;
+            return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+          },
+        },
+      ).result();
+      assert.equal(requests, 1);
+      assert.equal(thinking.stopReason, "stop", thinking.errorMessage);
+      assert.equal(thinking.content[0].thinkingSignature, marker);
+      settings({
+        restore: { diskCache: false },
+        track: { minChunkTokens: 1 },
+        workingSet: { triggerTokens: 200, targetTokens: 100 },
+        retention: { preserveRecentResults: 0, preserveRecentMinutes: 0 },
+      });
+      extension = await load();
+      ctx.model = model;
+      ctx.thinkingLevel = "high";
+      await emit(extension, "session_start");
+      await emit(extension, "message_end", { message: thinking });
+      const output = [{ type: "text", text: "src/old.ts:1: hit\n".repeat(200) }];
+      await emit(extension, "tool_result", { toolCallId: "old", toolName: "rg", content: output });
+      const messages = [
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "old", name: "rg", arguments: {} }],
+        },
+        { role: "toolResult", toolCallId: "old", toolName: "rg", content: output },
+        thinking,
+      ];
+      await emit(extension, "context", { messages });
+      const rewritten = await emit(extension, "context", { messages });
+      assert.deepEqual(
+        rewritten?.messages,
+        [thinking],
+        `adapter marker ${marker} must permit retirement`,
+      );
+      await emit(extension, "session_shutdown");
+    }
+    console.log(
+      `Pi ${sdk.VERSION}: real OpenAI adapter reasoning markers permit pruning (mocked HTTP, no network)`,
+    );
+  }
   console.log(
     `Pi ${sdk.VERSION}: settings, warnings, nested validation, cache failure and project override smoke passed`,
   );

@@ -45,7 +45,14 @@ until substantial new growth. See the
 
 Pruning pauses for models declaring prefix-bound effort support, even when
 thinking is set to off, and for histories containing non-empty thinking signatures
-or redacted thinking. Reasoning capability, a high or unknown thinking level, and
+or redacted thinking. Pi's OpenAI Chat Completions adapter also stores the literal
+field names `reasoning_content`, `reasoning`, and `reasoning_text` in
+`thinkingSignature`; these are transport markers, not signatures, and do not
+pause pruning. Other non-empty signatures remain protected. `/prune-status`
+identifies whether a pause came from model prefix-binding metadata, signed
+thinking, or redacted thinking.
+
+Reasoning capability, a high or unknown thinking level, and
 ordinary unsigned thinking blocks do **not** pause pruning. Local reasoning models
 such as Qwen can therefore use the normal 32,768-to-16,384 tracked-tool-output
 working set, including with a 164K context window. Pi still owns compaction.
