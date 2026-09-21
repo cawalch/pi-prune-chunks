@@ -9,6 +9,9 @@ declare module "@earendil-works/pi-coding-agent" {
     percent: number | null;
   }
 
+  export const CONFIG_DIR_NAME: string;
+  export function getAgentDir(): string;
+
   export interface ExtensionAPI {
     on(event: string, handler: (event: any, ctx: any) => Promise<any>): void;
     registerTool(definition: any): void;

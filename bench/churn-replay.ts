@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import extension from "../index";
 
 async function main(): Promise<void> {
@@ -9,83 +12,95 @@ async function main(): Promise<void> {
   const notifications: string[] = [];
   let compactCalls = 0;
 
-extension({
-  settings: {
-    pruneChunks: {
-      track: { minChunkTokens: 1 },
-      restore: { diskCache: false },
-    },
-  },
-  on(name: string, handler: (event: any, ctx: any) => Promise<any>) {
-    handlers[name] = handler;
-  },
-  registerTool(tool: unknown) {
-    modelTools.push(tool);
-  },
-  registerCommand() {},
-  appendEntry(customType: string, data: unknown) {
-    stateEntries.push({ customType, data });
-  },
-} as any);
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const agentDir = mkdtempSync(path.join(tmpdir(), "pi-prune-churn-"));
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  writeFileSync(
+    path.join(agentDir, "settings.json"),
+    JSON.stringify({
+      pruneChunks: { track: { minChunkTokens: 1 }, restore: { diskCache: false } },
+    }),
+  );
+  try {
+    extension({
+      on(name: string, handler: (event: any, ctx: any) => Promise<any>) {
+        handlers[name] = handler;
+      },
+      registerTool(tool: unknown) {
+        modelTools.push(tool);
+      },
+      registerCommand() {},
+      appendEntry(customType: string, data: unknown) {
+        stateEntries.push({ customType, data });
+      },
+    } as any);
 
-  const messages: any[] = [];
-  for (let index = 0; index < 12; index++) {
-    const id = `churn-${index}`;
-    const output = `src/file-${index}.ts:1: unique hit ${index}\n`.repeat(100);
-    await handlers.tool_result(
-      { toolCallId: id, toolName: "rg", content: [{ type: "text", text: output }] },
-      {},
-    );
-    messages.push({
-      role: "assistant",
-      content: [{ type: "toolCall", id, name: "rg", arguments: { query: `unique-${index}` } }],
-    });
-    messages.push({
-      role: "toolResult",
-      toolCallId: id,
-      toolName: "rg",
-      content: [{ type: "text", text: output }],
-    });
+    await handlers.session_start({}, { cwd: agentDir, isProjectTrusted: () => false });
+
+    const messages: any[] = [];
+    for (let index = 0; index < 12; index++) {
+      const id = `churn-${index}`;
+      const output = `src/file-${index}.ts:1: unique hit ${index}\n`.repeat(100);
+      await handlers.tool_result(
+        { toolCallId: id, toolName: "rg", content: [{ type: "text", text: output }] },
+        {},
+      );
+      messages.push({
+        role: "assistant",
+        content: [{ type: "toolCall", id, name: "rg", arguments: { query: `unique-${index}` } }],
+      });
+      messages.push({
+        role: "toolResult",
+        toolCallId: id,
+        toolName: "rg",
+        content: [{ type: "text", text: output }],
+      });
+    }
+
+    const ctx = {
+      hasUI: true,
+      getContextUsage: () => ({ tokens: 28_480, contextWindow: 32_000, percent: 89 }),
+      compact() {
+        compactCalls += 1;
+      },
+      ui: {
+        notify(message: string) {
+          notifications.push(message);
+        },
+        setStatus() {},
+      },
+    };
+
+    const startedAt = performance.now();
+    let rewrites = 0;
+    for (let pass = 0; pass < 1_000; pass++) {
+      if (await handlers.context({ messages }, ctx)) rewrites += 1;
+    }
+    const durationMs = performance.now() - startedAt;
+
+    console.log("89% unchanged-context churn replay (tracked output exceeds v0.2's old cap)");
+    console.log(`  passes: 1,000 in ${durationMs.toFixed(1)}ms`);
+    console.log(`  provider rewrites: ${rewrites}`);
+    console.log(`  state entries: ${stateEntries.length}`);
+    console.log(`  notifications: ${notifications.length}`);
+    console.log(`  model management tools: ${modelTools.length}`);
+    console.log(`  compact calls: ${compactCalls}`);
+
+    if (
+      rewrites !== 0 ||
+      stateEntries.length !== 0 ||
+      notifications.length !== 0 ||
+      modelTools.length !== 0 ||
+      compactCalls !== 0
+    ) {
+      throw new Error("below-threshold context caused v0.3 management churn");
+    }
+  } finally {
+    await handlers.session_shutdown?.({}, {});
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(agentDir, { recursive: true, force: true });
   }
-
-const ctx = {
-  hasUI: true,
-  getContextUsage: () => ({ tokens: 28_480, contextWindow: 32_000, percent: 89 }),
-  compact() {
-    compactCalls += 1;
-  },
-  ui: {
-    notify(message: string) {
-      notifications.push(message);
-    },
-    setStatus() {},
-  },
-};
-
-const startedAt = performance.now();
-let rewrites = 0;
-for (let pass = 0; pass < 1_000; pass++) {
-  if (await handlers.context({ messages }, ctx)) rewrites += 1;
-}
-const durationMs = performance.now() - startedAt;
-
-console.log("89% unchanged-context churn replay (tracked output exceeds v0.2's old cap)");
-console.log(`  passes: 1,000 in ${durationMs.toFixed(1)}ms`);
-console.log(`  provider rewrites: ${rewrites}`);
-console.log(`  state entries: ${stateEntries.length}`);
-console.log(`  notifications: ${notifications.length}`);
-console.log(`  model management tools: ${modelTools.length}`);
-console.log(`  compact calls: ${compactCalls}`);
-
-if (
-  rewrites !== 0 ||
-  stateEntries.length !== 0 ||
-  notifications.length !== 0 ||
-  modelTools.length !== 0 ||
-  compactCalls !== 0
-) {
-  throw new Error("below-threshold context caused v0.3 management churn");
-}
 }
 
 void main();

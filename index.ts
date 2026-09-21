@@ -2,9 +2,10 @@
  * Prune Chunks v0.4 - proactive working-set control for long-horizon tool output.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { extractReasoningAnchors } from "./src/anchors";
 import { collectToolResult } from "./src/collector";
 import { mergeConfig, type RawPruneChunksConfig } from "./src/config";
@@ -45,22 +46,56 @@ import type {
 const STATE_TYPE = "prune-chunks-state-v3";
 
 export default function (pi: ExtensionAPI) {
-  let config: PruneChunksConfig;
-  try {
-    config = resolveConfig(pi);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    pi.log?.("error", message);
-    throw error;
-  }
+  let resolvedConfig = loadConfig();
+  let config = resolvedConfig.config;
+  let configSource = resolvedConfig.sourceSummary;
+  let configError = resolvedConfig.error;
+  let cacheSignature: string | undefined;
 
-  const registry = new ChunkRegistry(createContentCache(config));
+  // Project overrides are only available once a lifecycle context exists.
+  const registry = new ChunkRegistry();
   const telemetry = new TelemetryRecorder();
   const pendingArchives = new Set<Promise<void>>();
   let workingSetState: WorkingSetSweepState | undefined;
   let pressureState: PressureSweepState | undefined;
   let pendingProviderRewrite = false;
   let reconcileAfterCompaction = false;
+  let signedHistory = false;
+
+  async function refreshLifecycleConfig(ctx?: unknown): Promise<boolean> {
+    let next = loadConfig(ctx);
+    const nextCacheSignature = contentCacheSignature(next.config);
+    if (nextCacheSignature !== cacheSignature) {
+      await Promise.allSettled([...pendingArchives]);
+      try {
+        registry.reset(createContentCache(next.config));
+        cacheSignature = nextCacheSignature;
+      } catch (error) {
+        next = disabledConfig(`Cannot initialize prune-chunks cache: ${errorMessage(error)}`);
+        registry.reset(new MemoryChunkContentCache());
+        cacheSignature = undefined;
+      }
+    }
+    resolvedConfig = next;
+    config = resolvedConfig.config;
+    configSource = resolvedConfig.sourceSummary;
+    configError = resolvedConfig.error;
+    if (configError) {
+      registry.reset();
+      resetSweepState();
+      reportConfigurationError(ctx, configError);
+      return false;
+    }
+    return true;
+  }
+
+  function resetSweepState(): void {
+    workingSetState = undefined;
+    pressureState = undefined;
+    pendingProviderRewrite = false;
+    reconcileAfterCompaction = false;
+    signedHistory = false;
+  }
 
   function persistActions(actions: StateDeltaAction[]): void {
     if (actions.length === 0) return;
@@ -110,23 +145,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    const entries = ctx?.sessionManager?.getEntries?.() ?? [];
-    const compactedIds = rebuildRegistry(registry, entries, config);
+    if (!(await refreshLifecycleConfig(ctx))) return;
+    const compactedIds = rebuildRegistry(registry, currentBranchEntries(ctx), config);
     scheduleArchive(compactedIds);
-    workingSetState = undefined;
-    pressureState = undefined;
-    pendingProviderRewrite = false;
-    reconcileAfterCompaction = false;
+    resetSweepState();
   });
 
   pi.on("session_shutdown", async () => {
     await Promise.allSettled([...pendingArchives]);
     registry.reset();
     telemetry.reset();
-    workingSetState = undefined;
-    pressureState = undefined;
-    pendingProviderRewrite = false;
-    reconcileAfterCompaction = false;
+    resetSweepState();
   });
 
   pi.on("session_compact", async () => {
@@ -134,6 +163,13 @@ export default function (pi: ExtensionAPI) {
     workingSetState = undefined;
     pressureState = undefined;
     reconcileAfterCompaction = true;
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    if (!(await refreshLifecycleConfig(ctx))) return;
+    const compactedIds = rebuildRegistry(registry, currentBranchEntries(ctx), config);
+    scheduleArchive(compactedIds);
+    resetSweepState();
   });
 
   pi.on("tool_result", async (event) => {
@@ -155,6 +191,16 @@ export default function (pi: ExtensionAPI) {
     if (!config.enabled) return;
     const startedAt = performance.now();
     const originalMessages = event.messages ?? [];
+    signedHistory ||= protectsThinkingPrefix(ctx, originalMessages);
+    if (signedHistory) {
+      // Keep persisted retirements stable: resurrecting earlier output can also
+      // invalidate signatures produced against the already-pruned projection.
+      const rewritten = rewriteRetiredExchanges(originalMessages, registry);
+      pendingProviderRewrite = rewritten.modified;
+      if (ctx?.hasUI)
+        ctx.ui.setStatus("prune-chunks", "Pruning paused: protected thinking history");
+      return rewritten.modified ? { messages: rewritten.messages } : undefined;
+    }
     const reportedUsage = getUsage(ctx);
     const usage = withProviderEstimateFloor(reportedUsage, originalMessages);
     const preserve = preserveContext(originalMessages, ctx);
@@ -231,19 +277,38 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_end", async (event) => {
+    signedHistory ||= protectsThinkingPrefix(undefined, [event.message]);
     const providerUsage = assistantProviderUsage(event);
     if (!providerUsage) return;
     telemetry.recordProviderResponse(providerUsage, pendingProviderRewrite);
     pendingProviderRewrite = false;
   });
 
-  registerCommands(pi, registry, config, telemetry, retirePlan, persistActions);
+  registerCommands(
+    pi,
+    registry,
+    () => config,
+    () => configSource,
+    () => configError,
+    (ctx) =>
+      signedHistory ||
+      protectsThinkingPrefix(
+        ctx,
+        currentBranchEntries(ctx).map((entry) => (entry as { message?: unknown }).message),
+      ),
+    telemetry,
+    retirePlan,
+    persistActions,
+  );
 }
 
 function registerCommands(
   pi: ExtensionAPI,
   registry: ChunkRegistry,
-  config: PruneChunksConfig,
+  getConfig: () => PruneChunksConfig,
+  getConfigSource: () => string,
+  getConfigError: () => string | undefined,
+  historyProtected: (ctx: unknown) => boolean,
   telemetry: TelemetryRecorder,
   retirePlan: (
     plan: RetirementPlan,
@@ -255,7 +320,13 @@ function registerCommands(
   pi.registerCommand("prune-status", {
     description: "Show long-horizon working-set and tracked tool output status",
     async handler(_args, ctx) {
-      notify(ctx, renderStatus(registry, getUsage(ctx), config));
+      notify(
+        ctx,
+        [
+          renderStatus(registry, getUsage(ctx), getConfig(), getConfigSource(), getConfigError()),
+          ...(historyProtected(ctx) ? ["Pruning paused: protected thinking history"] : []),
+        ].join("\n"),
+      );
     },
   });
 
@@ -277,7 +348,7 @@ function registerCommands(
     async handler(args, ctx) {
       const parsed = parseCommandArgs(args);
       const limit = numberOption(parsed, "--limit") ?? 10;
-      const plan = manualRetirementPlan(registry, config, {
+      const plan = manualRetirementPlan(registry, getConfig(), {
         limit,
         preserve: preserveContext([], ctx),
       });
@@ -294,12 +365,19 @@ function registerCommands(
       const plan =
         explicitIds.length > 0
           ? planForIds(registry, explicitIds, "manual selection")
-          : manualRetirementPlan(registry, config, {
+          : manualRetirementPlan(registry, getConfig(), {
               limit,
               preserve: preserveContext([], ctx),
             });
       if (parsed.includes("--dry-run")) {
         notify(ctx, renderCandidates(plan.candidates));
+        return;
+      }
+      if (historyProtected(ctx)) {
+        notify(
+          ctx,
+          "Pruning paused: changing protected thinking history can invalidate reasoning. Start a new session to change retirement state.",
+        );
         return;
       }
       const results = retirePlan(plan, false, "manual /prune-now");
@@ -322,7 +400,14 @@ function registerCommands(
         notify(ctx, "Usage: /prune-restore <id> [id...]");
         return;
       }
-      const results = await restoreChunks(registry, ids, config, {
+      if (historyProtected(ctx)) {
+        notify(
+          ctx,
+          "Restore paused: changing protected thinking history can invalidate reasoning. The saved transcript remains intact.",
+        );
+        return;
+      }
+      const results = await restoreChunks(registry, ids, getConfig(), {
         cwd: currentWorkingDirectory(ctx),
       });
       telemetry.recordRestoreResults(results);
@@ -355,20 +440,208 @@ function registerCommands(
   });
 }
 
+/** Conservative guard: never start rewriting a thinking-capable model's prefix. */
+function protectsThinkingPrefix(ctx: unknown, messages: unknown[]): boolean {
+  const context = ctx as
+    | {
+        thinkingLevel?: string;
+        model?: { reasoning?: boolean; compat?: { supportsMidConvoEffort?: boolean } };
+      }
+    | undefined;
+  if (context?.model?.compat?.supportsMidConvoEffort === true) return true;
+  if (context?.model?.reasoning === true && context.thinkingLevel !== "off") return true;
+  return messages.some((message) => {
+    const candidate = message as { role?: string; content?: ContentBlock[] } | undefined;
+    return (
+      candidate?.role === "assistant" &&
+      Array.isArray(candidate.content) &&
+      candidate.content.some(
+        (block) => block.type === "thinking" || block.type === "redacted_thinking",
+      )
+    );
+  });
+}
+
 function createContentCache(config: PruneChunksConfig) {
   const memory = new MemoryChunkContentCache();
-  if (!config.restore.diskCache.enabled) return memory;
+  if (!config.enabled || !config.restore.diskCache.enabled) return memory;
   return new CompositeChunkContentCache(
     memory,
     new DiskChunkContentCache(config.restore.diskCache),
   );
 }
 
-function resolveConfig(pi: ExtensionAPI): PruneChunksConfig {
-  const raw =
-    (pi as unknown as { config?: { pruneChunks?: RawPruneChunksConfig } }).config?.pruneChunks ??
-    (pi as unknown as { settings?: { pruneChunks?: RawPruneChunksConfig } }).settings?.pruneChunks;
-  return mergeConfig(raw);
+function contentCacheSignature(config: PruneChunksConfig): string {
+  const disk = config.restore.diskCache;
+  return JSON.stringify({
+    enabled: config.enabled && disk.enabled,
+    directory: disk.directory,
+    maxAgeDays: disk.maxAgeDays,
+    maxBlobBytes: disk.maxBlobBytes,
+    maxBytes: disk.maxBytes,
+  });
+}
+
+type ResolvedConfig = {
+  config: PruneChunksConfig;
+  sourceSummary: string;
+  error?: string;
+};
+
+type ConfigLoadContext = {
+  cwd?: unknown;
+  sessionManager?: {
+    getCwd?: () => string;
+  };
+  isProjectTrusted?: () => boolean;
+};
+
+function loadConfig(ctx?: unknown): ResolvedConfig {
+  try {
+    const loaded = loadRawConfig(ctx);
+    try {
+      return {
+        config: mergeConfig(loaded.raw),
+        sourceSummary: loaded.sourceSummary,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Invalid pruneChunks settings from ${loaded.sourceSummary}: ${message}`);
+    }
+  } catch (error) {
+    return disabledConfig(errorMessage(error));
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function disabledConfig(error: string): ResolvedConfig {
+  return {
+    config: mergeConfig({ enabled: false, restore: { diskCache: false } }),
+    sourceSummary: "configuration error; pruning disabled until settings are valid",
+    error,
+  };
+}
+
+function reportConfigurationError(ctx: unknown, error: string): void {
+  const context = ctx as {
+    hasUI?: boolean;
+    ui?: { notify?: (text: string, level: string) => void };
+  };
+  const message = `prune-chunks disabled: ${error}. Fix settings and reload Pi.`;
+  if (context?.hasUI && typeof context.ui?.notify === "function") {
+    context.ui.notify(message, "error");
+  } else {
+    process.stderr.write(`${message}\n`);
+  }
+}
+
+function loadRawConfig(ctx?: unknown): { raw?: RawPruneChunksConfig; sourceSummary: string } {
+  const sources: string[] = [];
+  let raw: RawPruneChunksConfig | undefined;
+
+  const globalPath = path.join(getAgentDir(), "settings.json");
+  const globalConfig = readPruneChunksSettings(globalPath, "global");
+  if (globalConfig) {
+    raw = mergeRawPruneConfig(raw, globalConfig);
+    sources.push(`global ${globalPath}`);
+  }
+
+  const cwd = configCwd(ctx);
+  if (cwd && isTrustedProject(ctx)) {
+    const projectPath = path.join(cwd, CONFIG_DIR_NAME, "settings.json");
+    const projectConfig = readPruneChunksSettings(projectPath, "trusted project");
+    if (projectConfig) {
+      raw = mergeRawPruneConfig(raw, projectConfig);
+      sources.push(`project ${projectPath}`);
+    }
+  }
+
+  const projectNote = cwd
+    ? isTrustedProject(ctx)
+      ? "trusted project settings checked"
+      : "project settings ignored because project is not trusted"
+    : "no project cwd available";
+  return {
+    raw,
+    sourceSummary: sources.length > 0 ? sources.join("; ") : `defaults (${projectNote})`,
+  };
+}
+
+function readPruneChunksSettings(
+  settingsPath: string,
+  label: "global" | "trusted project",
+): RawPruneChunksConfig | undefined {
+  if (!existsSync(settingsPath)) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(settingsPath, "utf8").replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new Error(
+      `Invalid ${label} settings at ${settingsPath}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Invalid ${label} settings at ${settingsPath}: expected a JSON object`);
+  }
+  const raw = (parsed as { pruneChunks?: unknown }).pruneChunks;
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`Invalid ${label} pruneChunks settings at ${settingsPath}: expected an object`);
+  }
+  return raw as RawPruneChunksConfig;
+}
+
+function mergeRawPruneConfig(
+  base: RawPruneChunksConfig | undefined,
+  override: RawPruneChunksConfig,
+): RawPruneChunksConfig {
+  return deepMergePlainObjects(base ?? {}, override) as RawPruneChunksConfig;
+}
+
+function deepMergePlainObjects(base: Record<string, unknown>, override: Record<string, unknown>) {
+  const output: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const existing = output[key];
+    output[key] =
+      isPlainObject(existing) && isPlainObject(value)
+        ? deepMergePlainObjects(existing, value)
+        : cloneJsonValue(value);
+  }
+  return output;
+}
+
+function cloneJsonValue<T>(value: T): T {
+  if (value === undefined) return value;
+  return structuredClone(value);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function configCwd(ctx?: unknown): string | undefined {
+  const candidate = ctx as ConfigLoadContext | undefined;
+  if (typeof candidate?.cwd === "string") return candidate.cwd;
+  const sessionCwd = candidate?.sessionManager?.getCwd?.();
+  return typeof sessionCwd === "string" ? sessionCwd : undefined;
+}
+
+function isTrustedProject(ctx?: unknown): boolean {
+  const trust = (ctx as ConfigLoadContext | undefined)?.isProjectTrusted;
+  return typeof trust === "function" && trust() === true;
+}
+
+function currentBranchEntries(ctx?: unknown): unknown[] {
+  const sessionManager = (ctx as { sessionManager?: unknown } | undefined)?.sessionManager as
+    | {
+        getBranch?: () => unknown[];
+        getEntries?: () => unknown[];
+      }
+    | undefined;
+  return sessionManager?.getBranch?.() ?? sessionManager?.getEntries?.() ?? [];
 }
 
 function rebuildRegistry(

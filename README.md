@@ -41,6 +41,22 @@ crosses a high-water mark once, falls toward a low-water mark, and stays stable
 until substantial new growth. See the
 [July/August 2026 research and experiments](docs/research-2026-08.md).
 
+## Thinking-history protection
+
+Pruning pauses before the first provider request for models with active reasoning
+(or an unknown thinking level), and for models declaring prefix-bound effort
+support even when thinking is set to off. Replayed thinking blocks also pause
+pruning. This conservative guard avoids deleting history that later signed
+thinking depends on. Pi continues to own compaction.
+
+While paused, no new automatic retirement, validation-message shortening, or
+manual prune/restore changes occur. Existing persisted retirements remain applied
+to avoid resurrecting an already-removed prefix. `/prune-status` explains the
+pause. Start a fresh session when changing pruning policy or upgrading an old
+session whose history was already rewritten; this safeguard cannot repair
+previously invalidated thinking. It deliberately limits pruning's applicability
+to non-thinking sessions, rather than promising universal savings.
+
 ## Live long-horizon evidence
 
 A five-trial matched A/B used real provider calls through Pi with 65,536 tokens
@@ -105,8 +121,17 @@ to the model:
 
 ## Configuration
 
-The defaults are usually sufficient. Rot control and emergency pressure are
-configured separately:
+Settings load from Pi's agent-directory `settings.json` and the trusted project's
+`.pi/settings.json`, using the SDK's directory exports. Project values override
+global values recursively. Untrusted project settings are ignored. Settings are
+refreshed on session start/reload and tree navigation; cache storage is opened
+only after those overrides are resolved.
+
+Malformed settings or an inaccessible effective cache path disable pruning and
+produce a startup error notification (stderr without UI). Fix the settings and
+reload Pi. `/prune-status` shows the effective source and any error.
+
+Rot control and emergency pressure are configured separately:
 
 ```json
 {
