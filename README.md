@@ -43,19 +43,21 @@ until substantial new growth. See the
 
 ## Thinking-history protection
 
-Pruning pauses before the first provider request for models with active reasoning
-(or an unknown thinking level), and for models declaring prefix-bound effort
-support even when thinking is set to off. Replayed thinking blocks also pause
-pruning. This conservative guard avoids deleting history that later signed
-thinking depends on. Pi continues to own compaction.
+Pruning pauses for models declaring prefix-bound effort support, even when
+thinking is set to off, and for histories containing non-empty thinking signatures
+or redacted thinking. Reasoning capability, a high or unknown thinking level, and
+ordinary unsigned thinking blocks do **not** pause pruning. Local reasoning models
+such as Qwen can therefore use the normal 32,768-to-16,384 tracked-tool-output
+working set, including with a 164K context window. Pi still owns compaction.
 
 While paused, no new automatic retirement, validation-message shortening, or
 manual prune/restore changes occur. Existing persisted retirements remain applied
 to avoid resurrecting an already-removed prefix. `/prune-status` explains the
-pause. Start a fresh session when changing pruning policy or upgrading an old
-session whose history was already rewritten; this safeguard cannot repair
-previously invalidated thinking. It deliberately limits pruning's applicability
-to non-thinking sessions, rather than promising universal savings.
+pause. Start a fresh session when changing a protected history's pruning policy
+or upgrading a signed-thinking session whose prefix was already rewritten; this
+safeguard cannot repair previously invalidated thinking. After upgrading from the overly broad guard,
+reload Pi to clear the old in-memory pause; an unsigned local-model session can
+then continue without starting over. Signed-history protections remain active.
 
 ## Live long-horizon evidence
 

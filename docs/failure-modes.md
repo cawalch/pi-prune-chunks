@@ -43,8 +43,10 @@ rather than presenting new bytes as the original output.
 ## Thinking history
 
 Tool-call pairing alone does not preserve signed thinking. New retirement and
-validation rewrites pause for active reasoning models, prefix-bound effort models,
-or replayed thinking blocks. Manual prune/restore mutations are blocked too.
+validation rewrites pause for prefix-bound effort models or histories containing
+non-empty thinking signatures or redacted thinking. Ordinary unsigned reasoning,
+including local models with thinking enabled or unspecified, does not pause
+pruning. Manual prune/restore mutations are blocked for protected histories too.
 Already-persisted retirement projections remain stable. This does not repair a
 prefix invalidated by an earlier version or another extension; start a new session
 when upgrading previously rewritten thinking histories.
